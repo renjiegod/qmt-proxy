@@ -86,7 +86,7 @@ function Quote-Single {
 }
 
 function Get-UvRunArguments {
-    return @("-m", "uv", "run", "--no-project", "--python", $PythonVersion, "python", "run.py")
+    return @("-m", "uv", "run", "--python", $PythonVersion, "python", "run.py")
 }
 
 function Get-RequiredPortListeners {
@@ -199,7 +199,7 @@ function Start-BackgroundServiceProcess {
     Remove-Item $ErrLogFile -Force -ErrorAction SilentlyContinue
 
     $cmdPython = $PythonExe.Replace('"', '\"')
-    $cmdCommand = 'set "APP_MODE=' + $AppMode + '" && set "PYTHONUTF8=1" && set "PYTHONIOENCODING=utf-8" && "' + $cmdPython + '" -m uv run --no-project --python ' + $PythonVersion + ' python run.py'
+    $cmdCommand = 'set "APP_MODE=' + $AppMode + '" && set "PYTHONUTF8=1" && set "PYTHONIOENCODING=utf-8" && "' + $cmdPython + '" -m uv run --python ' + $PythonVersion + ' python run.py'
 
     $process = Start-Process `
         -FilePath "cmd.exe" `

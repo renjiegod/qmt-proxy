@@ -30,6 +30,9 @@ name = "tsinghua"
 url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 default = true
 
+[tool.poetry]
+packages = [{ include = "app" }]
+
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
