@@ -2,18 +2,33 @@
 
 `qmt_proxy_sdk` is the async-first Python SDK for the REST interface exposed by `qmt-proxy`.
 
-This SDK is currently designed for in-repo or monorepo usage. Run from the repository root so `app/` and `libs/` are both importable, or insert both paths into `sys.path` before importing the package.
+This package is designed to be installed independently and only covers REST communication.
+
+## Installation
+
+Install from the package directory during local development:
+
+```bash
+pip install ./libs/qmt_proxy_sdk
+```
+
+When published to an index, install the distribution name:
+
+```bash
+pip install qmt-proxy-sdk
+```
+
+Or build and install a wheel from inside `libs/qmt_proxy_sdk`:
+
+```bash
+python -m build
+pip install dist/qmt_proxy_sdk-*.whl
+```
 
 ## Quick Start
 
 ```python
 import asyncio
-import sys
-from pathlib import Path
-
-repo_root = Path.cwd()
-sys.path.insert(0, str(repo_root))
-sys.path.insert(0, str(repo_root / "libs"))
 
 from qmt_proxy_sdk import AsyncQmtProxyClient
 
@@ -60,4 +75,4 @@ The SDK sends `Authorization: Bearer <api_key>`, which matches the current serve
 
 - This SDK only covers REST communication.
 - WebSocket streaming is intentionally out of scope for this package.
-- Some SDK models currently mirror server models from the same repository, which is acceptable for in-repo use but means this package is not yet a standalone distribution.
+- The package is self-contained and does not require importing the server-side `app` package.

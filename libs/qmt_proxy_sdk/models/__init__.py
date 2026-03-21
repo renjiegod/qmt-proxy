@@ -19,6 +19,7 @@ from qmt_proxy_sdk.models.data import (
 )
 from qmt_proxy_sdk.models.system import AppInfo, HealthStatus, RootInfo, ServiceStatus
 from qmt_proxy_sdk.models.trading import (
+    AccountType,
     AccountInfo,
     AssetInfo,
     ConnectResponse,
@@ -34,6 +35,7 @@ from qmt_proxy_sdk.models.trading import (
 __all__ = [
     "AppInfo",
     "AccountInfo",
+    "AccountType",
     "AssetInfo",
     "ConvertibleBondInfo",
     "ConnectResponse",
