@@ -22,6 +22,14 @@ dependencies = [
     "xtquant (>=250516.1.1,<250517.0.0)",
 ]
 
+[tool.uv]
+python-preference = "managed"
+
+[[tool.uv.index]]
+name = "tsinghua"
+url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+default = true
+
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

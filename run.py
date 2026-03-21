@@ -11,17 +11,30 @@ import uvicorn
 sys.path.insert(0, os.path.dirname(__file__))
 
 
+def configure_stdio_encoding():
+    """Force UTF-8 stdout/stderr on Windows consoles."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def start_grpc():
     """启动 gRPC 服务"""
     from app.grpc_server import serve as grpc_serve
     grpc_serve()
 
 
+def get_reload_config(settings):
+    """Disable reload because this process also starts the gRPC server."""
+    return False, None
+
+
 def print_banner(settings):
     grpc_info = f"{settings.grpc_host}:{settings.grpc_port}" if settings.grpc_enabled else "未启用"
     """打印启动横幅"""
     print("\n" + "=" * 80)
-    print("🚀 xtquant-proxy 服务启动中...")
+    print("xtquant-proxy 服务启动中...")
     print("=" * 80)
     print(f"应用名称:     {settings.app.name} v{settings.app.version}")
     print(f"运行模式:     {settings.xtquant.mode.value}")
@@ -33,14 +46,16 @@ def print_banner(settings):
     print(f"API 文档:     http://{settings.app.host}:{settings.app.port}/docs")
     print(f"日志级别:     {settings.logging.level}")
     print("=" * 80)
-    print("\n💡 提示: 使用环境变量 APP_MODE 切换运行模式")
-    print("   • mock - 模拟模式，不连接 xtquant，返回模拟数据")
-    print("   • dev  - 开发模式，连接 xtquant，禁止真实交易")
-    print("   • prod - 生产模式，连接 xtquant，允许真实交易")
+    print("\n提示: 使用环境变量 APP_MODE 切换运行模式")
+    print("   - mock: 模拟模式，不连接 xtquant，返回模拟数据")
+    print("   - dev:  开发模式，连接 xtquant，禁止真实交易")
+    print("   - prod: 生产模式，连接 xtquant，允许真实交易")
     print("=" * 80 + "\n")
 
 
 if __name__ == '__main__':
+    configure_stdio_encoding()
+
     # 设置运行模式（如果未设置）
     if not os.getenv("APP_MODE"):
         os.environ["APP_MODE"] = "dev"
@@ -70,14 +85,8 @@ if __name__ == '__main__':
         grpc_thread.start()
     
     # 主线程运行 FastAPI
-    # 热加载配置：关闭热加载，或仅监控 .py 文件
-    reload_enabled = True  # 默认关闭热加载
-    reload_includes = None
-    
-    # 如果需要启用热加载，取消下面的注释并设置为 True
-    reload_enabled = settings.app.debug
-    reload_includes = ["*.py"]  # 仅监控 Python 源码文件
-    
+    reload_enabled, reload_includes = get_reload_config(settings)
+
     uvicorn.run(
         "app.main:app",
         host=settings.app.host,
