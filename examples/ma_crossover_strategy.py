@@ -1,15 +1,23 @@
 """
-双均线交叉量化交易策略示例
-========================
+双均线交叉量化交易策略示例（含仓位管理）
+========================================
 
 本示例展示如何使用 qmt-proxy SDK 完成一个完整的量化交易流程：
 
 1. 连接服务 & 健康检查
-2. 获取沪深 300 成分股，通过历史行情数据进行选股
-3. 建立交易会话
+2. 获取候选股票池，通过历史行情数据进行选股
+3. 建立交易会话 & 初始化仓位管理器（查询资金、分配仓位）
 4. 通过 WebSocket 订阅目标股实时行情
 5. 基于双均线（MA5/MA20）交叉策略生成买卖信号
-6. 自动执行买入 / 卖出 / 空仓操作
+6. 根据仓位管理器动态计算下单数量，执行买入 / 卖出 / 空仓操作
+
+仓位管理规则::
+
+    - 总仓位上限：不超过总资产的 80%（可配置）
+    - 单只个股上限：不超过总资产的 30%（可配置）
+    - 可用资金按目标股数量均分，每笔买入量 = 分配资金 / 现价，向下取整到 100 股
+    - 卖出时按实际持仓数量全部卖出
+    - 每笔交易后实时刷新账户资产和持仓
 
 运行方式::
 
@@ -58,8 +66,12 @@ ACCOUNT_ID = os.getenv("QMT_ACCOUNT_ID", "test_account")
 SHORT_MA_PERIOD = 5
 LONG_MA_PERIOD = 20
 SCREENING_DAYS = 60
-ORDER_VOLUME = 100  # 每笔下单数量（股）
-MAX_POSITIONS = 3   # 最大同时持仓数
+MAX_POSITIONS = 3                   # 最大同时持仓数
+
+# 仓位管理参数
+MAX_TOTAL_POSITION_RATIO = 0.80     # 总仓位上限（占总资产比例）
+MAX_SINGLE_POSITION_RATIO = 0.30    # 单只个股仓位上限（占总资产比例）
+MIN_ORDER_VOLUME = 100              # A 股最小交易单位（股）
 
 CANDIDATE_STOCKS = [
     "600519.SH",  # 贵州茅台
@@ -89,12 +101,113 @@ class StockContext:
     prev_short_ma: float | None = None
     prev_long_ma: float | None = None
     held: bool = False
+    held_volume: int = 0       # 当前持仓数量
+    held_cost: float = 0.0     # 当前持仓成本价
 
 
 def calc_ma(prices: deque, period: int) -> float | None:
     if len(prices) < period:
         return None
     return sum(list(prices)[-period:]) / period
+
+
+class PositionManager:
+    """仓位管理器：根据账户资金动态分配每只股票的下单数量。"""
+
+    def __init__(
+        self,
+        total_asset: float,
+        available_cash: float,
+        market_value: float,
+        target_count: int,
+    ) -> None:
+        self.total_asset = total_asset
+        self.available_cash = available_cash
+        self.market_value = market_value
+        self.target_count = max(target_count, 1)
+        self._log_allocation_plan()
+
+    def _log_allocation_plan(self) -> None:
+        max_position_value = self.total_asset * MAX_TOTAL_POSITION_RATIO
+        remaining_capacity = max(max_position_value - self.market_value, 0)
+        investable = min(self.available_cash, remaining_capacity)
+        per_stock_budget = investable / self.target_count
+        single_cap = self.total_asset * MAX_SINGLE_POSITION_RATIO
+
+        log.info("仓位管理器初始化:")
+        log.info("  总资产:       %.2f", self.total_asset)
+        log.info("  可用资金:     %.2f", self.available_cash)
+        log.info("  已用仓位:     %.2f (%.1f%%)", self.market_value, self.market_value / self.total_asset * 100 if self.total_asset else 0)
+        log.info("  总仓位上限:   %.2f (%.0f%%)", max_position_value, MAX_TOTAL_POSITION_RATIO * 100)
+        log.info("  剩余可投资金: %.2f", investable)
+        log.info("  目标股数量:   %d", self.target_count)
+        log.info("  每股预算:     %.2f", per_stock_budget)
+        log.info("  单股仓位上限: %.2f (%.0f%%)", single_cap, MAX_SINGLE_POSITION_RATIO * 100)
+
+    def refresh(self, total_asset: float, available_cash: float, market_value: float) -> None:
+        """交易后刷新资金数据。"""
+        self.total_asset = total_asset
+        self.available_cash = available_cash
+        self.market_value = market_value
+
+    def calc_buy_volume(self, stock_code: str, price: float, current_position_value: float = 0) -> int:
+        """计算买入数量（向下取整到 100 股）。
+
+        Returns 0 表示不应买入（资金不足或超出仓位限制）。
+        """
+        if price <= 0 or self.total_asset <= 0:
+            return 0
+
+        # 检查总仓位上限
+        max_position_value = self.total_asset * MAX_TOTAL_POSITION_RATIO
+        remaining_capacity = max(max_position_value - self.market_value, 0)
+        if remaining_capacity < price * MIN_ORDER_VOLUME:
+            log.info(
+                "  [仓位] 总仓位已达 %.1f%%，剩余容量 %.2f 不足买入 %s",
+                self.market_value / self.total_asset * 100,
+                remaining_capacity,
+                stock_code,
+            )
+            return 0
+
+        # 检查单股仓位上限
+        single_cap = self.total_asset * MAX_SINGLE_POSITION_RATIO
+        single_remaining = max(single_cap - current_position_value, 0)
+        if single_remaining < price * MIN_ORDER_VOLUME:
+            log.info(
+                "  [仓位] %s 单股仓位已达 %.1f%%，上限 %.0f%%",
+                stock_code,
+                current_position_value / self.total_asset * 100,
+                MAX_SINGLE_POSITION_RATIO * 100,
+            )
+            return 0
+
+        # 按目标数量均分可用资金
+        per_stock_budget = min(self.available_cash, remaining_capacity) / self.target_count
+        # 取均分预算和单股上限中较小值
+        investable = min(per_stock_budget, single_remaining)
+        volume = int(investable / price)
+        # 向下取整到 100 股
+        volume = (volume // MIN_ORDER_VOLUME) * MIN_ORDER_VOLUME
+
+        if volume < MIN_ORDER_VOLUME:
+            log.info(
+                "  [仓位] %s 可投资金 %.2f 不足买入 %d 股 (需 %.2f)",
+                stock_code,
+                investable,
+                MIN_ORDER_VOLUME,
+                price * MIN_ORDER_VOLUME,
+            )
+            return 0
+
+        log.info(
+            "  [仓位] %s 分配资金=%.2f | 计算买入=%d股 | 预计金额=%.2f",
+            stock_code,
+            investable,
+            volume,
+            volume * price,
+        )
+        return volume
 
 
 # ---------------------------------------------------------------------------
@@ -209,10 +322,12 @@ async def screen_stocks(client: AsyncQmtProxyClient) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-async def connect_trading(client: AsyncQmtProxyClient) -> str:
+async def connect_trading(
+    client: AsyncQmtProxyClient, target_count: int
+) -> tuple[str, PositionManager]:
     log.info("")
     log.info("=" * 60)
-    log.info("阶段 3：建立交易会话")
+    log.info("阶段 3：建立交易会话 & 初始化仓位管理")
     log.info("=" * 60)
 
     resp = await client.trading.connect(account_id=ACCOUNT_ID)
@@ -241,18 +356,28 @@ async def connect_trading(client: AsyncQmtProxyClient) -> str:
         log.info("当前持仓 (%d 只):", len(positions))
         for pos in positions:
             log.info(
-                "  %s %s | 数量=%d | 成本=%.2f | 现价=%.2f | 盈亏=%.2f",
+                "  %s %s | 数量=%d | 可用=%d | 成本=%.2f | 现价=%.2f | 市值=%.2f | 盈亏=%.2f",
                 pos.stock_code,
                 pos.stock_name,
                 pos.volume,
+                pos.available_volume,
                 pos.cost_price,
                 pos.market_price,
+                pos.market_value,
                 pos.profit_loss,
             )
     else:
         log.info("当前无持仓")
 
-    return session_id
+    log.info("")
+    pm = PositionManager(
+        total_asset=asset.total_asset,
+        available_cash=asset.available_cash,
+        market_value=asset.market_value,
+        target_count=target_count,
+    )
+
+    return session_id, pm
 
 
 # ---------------------------------------------------------------------------
@@ -260,25 +385,57 @@ async def connect_trading(client: AsyncQmtProxyClient) -> str:
 # ---------------------------------------------------------------------------
 
 
+async def sync_existing_positions(
+    client: AsyncQmtProxyClient,
+    session_id: str,
+    contexts: dict[str, StockContext],
+) -> None:
+    """将账户中已有持仓同步到 StockContext，避免重复买入或遗漏卖出。"""
+    positions = await client.trading.get_positions(session_id)
+    for pos in positions:
+        if pos.stock_code in contexts and pos.volume > 0:
+            ctx = contexts[pos.stock_code]
+            ctx.held = True
+            ctx.held_volume = pos.available_volume
+            ctx.held_cost = pos.cost_price
+            log.info(
+                "  [同步] %s 已持仓 %d 股 (可用 %d)，成本 %.2f",
+                pos.stock_code,
+                pos.volume,
+                pos.available_volume,
+                pos.cost_price,
+            )
+
+
 async def run_realtime_strategy(
     client: AsyncQmtProxyClient,
     session_id: str,
     targets: list[str],
+    pm: PositionManager,
 ) -> None:
     log.info("")
     log.info("=" * 60)
     log.info("阶段 4：订阅实时行情 & 执行交易策略")
     log.info("=" * 60)
     log.info(
-        "目标股票: %s | 策略: MA%d/MA%d 交叉 | 每笔=%d股 | 最大持仓=%d",
+        "目标股票: %s | 策略: MA%d/MA%d 交叉 | 最大持仓=%d",
         ", ".join(targets),
         SHORT_MA_PERIOD,
         LONG_MA_PERIOD,
-        ORDER_VOLUME,
         MAX_POSITIONS,
+    )
+    log.info(
+        "仓位规则: 总上限=%.0f%% | 单股上限=%.0f%% | 最小单位=%d股",
+        MAX_TOTAL_POSITION_RATIO * 100,
+        MAX_SINGLE_POSITION_RATIO * 100,
+        MIN_ORDER_VOLUME,
     )
 
     contexts: dict[str, StockContext] = {code: StockContext(code=code) for code in targets}
+
+    # 同步已有持仓到上下文
+    await sync_existing_positions(client, session_id, contexts)
+
     tick_count = 0
     trade_count = 0
 
@@ -304,6 +461,7 @@ async def run_realtime_strategy(
             short_ma = calc_ma(ctx.prices, SHORT_MA_PERIOD)
             long_ma = calc_ma(ctx.prices, LONG_MA_PERIOD)
 
+            position_str = f"{ctx.held_volume}股" if ctx.held else "无"
             log.info(
                 "[TICK #%04d] %s | 价格=%.2f | 量=%s | "
                 "MA%d=%s | MA%d=%s | 持仓=%s",
@@ -315,7 +473,7 @@ async def run_realtime_strategy(
                 f"{short_ma:.2f}" if short_ma else "N/A",
                 LONG_MA_PERIOD,
                 f"{long_ma:.2f}" if long_ma else "N/A",
-                "是" if ctx.held else "否",
+                position_str,
             )
 
             if short_ma is None or long_ma is None:
@@ -343,8 +501,15 @@ async def run_realtime_strategy(
                         LONG_MA_PERIOD,
                         long_ma,
                     )
-                    await execute_buy(client, session_id, ctx, price)
-                    trade_count += 1
+                    current_pos_value = ctx.held_volume * price
+                    volume = pm.calc_buy_volume(code, price, current_pos_value)
+                    if volume > 0:
+                        success = await execute_buy(client, session_id, ctx, price, volume)
+                        if success:
+                            trade_count += 1
+                            await refresh_position_manager(client, session_id, pm)
+                    else:
+                        log.info("  → 仓位管理器判定: 不满足买入条件，跳过")
 
             elif signal == "SELL" and ctx.held:
                 log.info(
@@ -354,8 +519,10 @@ async def run_realtime_strategy(
                     LONG_MA_PERIOD,
                     long_ma,
                 )
-                await execute_sell(client, session_id, ctx, price)
-                trade_count += 1
+                success = await execute_sell(client, session_id, ctx, price)
+                if success:
+                    trade_count += 1
+                    await refresh_position_manager(client, session_id, pm)
 
             else:
                 action = "持仓观望" if ctx.held else "空仓等待"
@@ -366,6 +533,24 @@ async def run_realtime_strategy(
 
     log.info("")
     log.info("实时行情流已结束，共处理 %d 个 tick，执行 %d 笔交易", tick_count, trade_count)
+
+
+async def refresh_position_manager(
+    client: AsyncQmtProxyClient, session_id: str, pm: PositionManager
+) -> None:
+    """交易后刷新仓位管理器中的资金数据。"""
+    try:
+        asset = await client.trading.get_asset(session_id)
+        pm.refresh(asset.total_asset, asset.available_cash, asset.market_value)
+        log.info(
+            "  [仓位刷新] 总资产=%.2f | 可用=%.2f | 已用仓位=%.2f (%.1f%%)",
+            asset.total_asset,
+            asset.available_cash,
+            asset.market_value,
+            asset.market_value / asset.total_asset * 100 if asset.total_asset else 0,
+        )
+    except QmtProxyError as exc:
+        log.warning("  [仓位刷新] 查询资产失败: %s", exc)
 
 
 def detect_signal(ctx: StockContext, short_ma: float, long_ma: float) -> str:
@@ -388,27 +573,37 @@ async def execute_buy(
     session_id: str,
     ctx: StockContext,
     price: float,
-) -> None:
-    log.info("  → 提交买入委托: %s | 价格=%.2f | 数量=%d", ctx.code, price, ORDER_VOLUME)
+    volume: int,
+) -> bool:
+    cost = volume * price
+    log.info(
+        "  → 提交买入委托: %s | 价格=%.2f | 数量=%d | 预计金额=%.2f",
+        ctx.code, price, volume, cost,
+    )
     try:
         order = await client.trading.submit_order(
             session_id=session_id,
             stock_code=ctx.code,
             side="BUY",
-            volume=ORDER_VOLUME,
+            volume=volume,
             price=price,
             order_type="LIMIT",
             strategy_name="ma_crossover",
         )
         ctx.held = True
+        ctx.held_volume += volume
+        ctx.held_cost = price
         log.info(
-            "  ✓ 买入委托已提交 | 订单号=%s | 状态=%s | 时间=%s",
+            "  ✓ 买入委托已提交 | 订单号=%s | 状态=%s | 时间=%s | 累计持仓=%d股",
             order.order_id,
             order.status,
             order.submitted_time,
+            ctx.held_volume,
         )
+        return True
     except QmtProxyError as exc:
         log.error("  ✗ 买入委托失败: %s", exc)
+        return False
 
 
 async def execute_sell(
@@ -416,27 +611,40 @@ async def execute_sell(
     session_id: str,
     ctx: StockContext,
     price: float,
-) -> None:
-    log.info("  → 提交卖出委托: %s | 价格=%.2f | 数量=%d", ctx.code, price, ORDER_VOLUME)
+) -> bool:
+    sell_volume = ctx.held_volume
+    if sell_volume <= 0:
+        sell_volume = MIN_ORDER_VOLUME
+    expected_amount = sell_volume * price
+    log.info(
+        "  → 提交卖出委托: %s | 价格=%.2f | 数量=%d（全部卖出）| 预计金额=%.2f",
+        ctx.code, price, sell_volume, expected_amount,
+    )
     try:
         order = await client.trading.submit_order(
             session_id=session_id,
             stock_code=ctx.code,
             side="SELL",
-            volume=ORDER_VOLUME,
+            volume=sell_volume,
             price=price,
             order_type="LIMIT",
             strategy_name="ma_crossover",
         )
-        ctx.held = False
+        profit = (price - ctx.held_cost) * sell_volume if ctx.held_cost > 0 else 0
         log.info(
-            "  ✓ 卖出委托已提交 | 订单号=%s | 状态=%s | 时间=%s",
+            "  ✓ 卖出委托已提交 | 订单号=%s | 状态=%s | 时间=%s | 预估盈亏=%.2f",
             order.order_id,
             order.status,
             order.submitted_time,
+            profit,
         )
+        ctx.held = False
+        ctx.held_volume = 0
+        ctx.held_cost = 0.0
+        return True
     except QmtProxyError as exc:
         log.error("  ✗ 卖出委托失败: %s", exc)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -515,12 +723,17 @@ async def main() -> None:
     log.info("服务地址: %s", BASE_URL)
     log.info("交易账户: %s", ACCOUNT_ID)
     log.info(
-        "策略参数: MA%d / MA%d | 选股天数=%d | 每笔=%d股 | 最大持仓=%d",
+        "策略参数: MA%d / MA%d | 选股天数=%d | 最大持仓=%d",
         SHORT_MA_PERIOD,
         LONG_MA_PERIOD,
         SCREENING_DAYS,
-        ORDER_VOLUME,
         MAX_POSITIONS,
+    )
+    log.info(
+        "仓位管理: 总上限=%.0f%% | 单股上限=%.0f%% | 最小单位=%d股",
+        MAX_TOTAL_POSITION_RATIO * 100,
+        MAX_SINGLE_POSITION_RATIO * 100,
+        MIN_ORDER_VOLUME,
     )
     log.info("")
 
@@ -531,12 +744,12 @@ async def main() -> None:
         # 阶段 2：选股
         targets = await screen_stocks(client)
 
-        # 阶段 3：建立交易连接
-        session_id = await connect_trading(client)
+        # 阶段 3：建立交易连接 & 初始化仓位管理
+        session_id, pm = await connect_trading(client, target_count=len(targets))
 
         # 阶段 4 & 5：实时监听 + 策略执行
         try:
-            await run_realtime_strategy(client, session_id, targets)
+            await run_realtime_strategy(client, session_id, targets, pm)
         except KeyboardInterrupt:
             log.info("\n收到中断信号，正在退出...")
         except QmtProxyError as exc:
