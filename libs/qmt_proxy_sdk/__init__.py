@@ -11,6 +11,7 @@ from qmt_proxy_sdk.exceptions import (
 from qmt_proxy_sdk.http import AsyncHttpTransport
 from qmt_proxy_sdk.system import SystemApi
 from qmt_proxy_sdk.trading import TradingApi
+from qmt_proxy_sdk.ws import QuoteStream
 
 __all__ = [
     "AsyncHttpTransport",
@@ -19,6 +20,7 @@ __all__ = [
     "ClientError",
     "DataApi",
     "QmtProxyError",
+    "QuoteStream",
     "RequestValidationError",
     "ServerError",
     "SystemApi",

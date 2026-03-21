@@ -9,6 +9,7 @@ authors = [{ name = "zhzhl0", email = "zhzhl0@163.com" }]
 dependencies = [
     "httpx>=0.28.1,<0.29.0",
     "pydantic>=2.12.4,<3.0.0",
+    "websockets>=15.0",
 ]
 keywords = ["qmt", "quant", "sdk", "rest", "trading"]
 classifiers = [

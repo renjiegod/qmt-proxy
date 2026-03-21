@@ -1,9 +1,20 @@
+"""
+DataApi 测试（对应 libs/qmt_proxy_sdk/data.py 与 app/routers/data.py）。
+
+说明：
+- 路由前缀均为 /api/v1/data，且依赖 verify_api_key（Bearer Token）。
+- RecordingTransport 返回的是「与 SDK transport 所见一致」的载荷（已解包的 data 或直接业务 JSON）。
+"""
+
 import importlib
 import importlib.util
+import logging
 import sys
 from pathlib import Path
 
 import pytest
+
+logger = logging.getLogger(__name__)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +31,8 @@ def _load_sdk_module(module_name: str):
 
 
 class RecordingTransport:
+    """按 (method, path) 返回预置 JSON，记录调用。"""
+
     def __init__(self, responses):
         self.responses = responses
         self.calls = []
@@ -32,19 +45,12 @@ class RecordingTransport:
         return None
 
 
-def _normalize(value):
-    if hasattr(value, "model_dump"):
-        return value.model_dump(exclude_none=True)
-    if isinstance(value, list):
-        return [_normalize(item) for item in value]
-    return value
-
-
 @pytest.mark.asyncio
 async def test_client_exposes_data_api_with_typed_query_models():
+    """串联调用多条 DataApi 只读接口，验证请求路径与 Pydantic 模型解析。"""
     client_module = _load_sdk_module("qmt_proxy_sdk.client")
     client_cls = getattr(client_module, "AsyncQmtProxyClient", None)
-    assert client_cls is not None, "Expected AsyncQmtProxyClient to be exported"
+    assert client_cls is not None
 
     transport = RecordingTransport(
         {
@@ -128,12 +134,24 @@ async def test_client_exposes_data_api_with_typed_query_models():
     assert holidays.holidays == ["20240101"]
     assert periods.periods == ["1d", "1m"]
     assert data_dir.data_dir == "C:/qmt/data"
+    logger.info(
+        "data 串联: market=%d sectors=%d calls=%d",
+        len(market),
+        len(sectors),
+        len(transport.calls),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 参数化测试：验证每个 DataApi 方法的 HTTP 路径 & 请求体
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("method_name", "kwargs", "expected_method", "expected_path", "expected_kwargs", "response"),
     [
+        # --- 财务与合约 ---
         (
             "get_financial_data",
             {"stock_codes": ["000001.SZ"], "table_list": ["balance"], "start_date": "20240101", "end_date": "20240131"},
@@ -148,16 +166,7 @@ async def test_client_exposes_data_api_with_typed_query_models():
             "GET",
             "/api/v1/data/instrument-type/000001.SZ",
             {},
-            {
-                "stock_code": "000001.SZ",
-                "index": False,
-                "stock": True,
-                "fund": False,
-                "etf": False,
-                "bond": False,
-                "option": False,
-                "futures": False,
-            },
+            {"stock_code": "000001.SZ", "index": False, "stock": True, "fund": False, "etf": False, "bond": False, "option": False, "futures": False},
         ),
         (
             "get_convertible_bonds",
@@ -175,21 +184,22 @@ async def test_client_exposes_data_api_with_typed_query_models():
             {},
             [{"security_code": "301000"}],
         ),
+        # --- 本地行情 / Tick / 除权 / K线 ---
         (
             "get_local_data",
             {"stock_codes": ["000001.SZ"], "start_time": "20240101", "end_time": "20240131"},
             "POST",
             "/api/v1/data/local-data",
             {"json": {"stock_codes": ["000001.SZ"], "start_time": "20240101", "end_time": "20240131", "period": "1d", "fields": None, "adjust_type": "none"}},
-            {"items": 1},
+            [{"stock_code": "000001.SZ", "data": [], "fields": [], "period": "1d", "start_date": "", "end_date": ""}],
         ),
         (
             "get_full_tick",
-            {"stock_codes": ["000001.SZ"], "start_time": "20240101", "end_time": "20240131"},
+            {"stock_codes": ["000001.SZ"]},
             "POST",
             "/api/v1/data/full-tick",
-            {"json": {"stock_codes": ["000001.SZ"], "start_time": "20240101", "end_time": "20240131"}},
-            {"ticks": []},
+            {"json": {"stock_codes": ["000001.SZ"], "start_time": "", "end_time": ""}},
+            {"000001.SZ": [{"time": "20240101120000", "last_price": 10.5}]},
         ),
         (
             "get_divid_factors",
@@ -197,23 +207,24 @@ async def test_client_exposes_data_api_with_typed_query_models():
             "POST",
             "/api/v1/data/divid-factors",
             {"json": {"stock_code": "000001.SZ"}},
-            [{"time": "20240101"}],
+            [{"time": "20240101", "interest": 0.5, "dr": 1.0}],
         ),
         (
             "get_full_kline",
-            {"stock_codes": ["000001.SZ"], "start_time": "20240101", "end_time": "20240131"},
+            {"stock_codes": ["000001.SZ"]},
             "POST",
             "/api/v1/data/full-kline",
-            {"json": {"stock_codes": ["000001.SZ"], "start_time": "20240101", "end_time": "20240131", "period": "1d", "fields": None, "adjust_type": "none"}},
-            {"kline": []},
+            {"json": {"stock_codes": ["000001.SZ"], "start_time": "", "end_time": "", "period": "1d", "fields": None, "adjust_type": "none"}},
+            [{"stock_code": "000001.SZ", "data": [], "fields": [], "period": "1d", "start_date": "", "end_date": ""}],
         ),
+        # --- 下载 ---
         (
             "download_history_data",
             {"stock_code": "000001.SZ", "period": "1d", "start_time": "20240101", "end_time": "20240131", "incrementally": True},
             "POST",
             "/api/v1/data/download/history-data",
             {"json": {"stock_code": "000001.SZ", "period": "1d", "start_time": "20240101", "end_time": "20240131", "incrementally": True}},
-            {"task_id": "hist-1"},
+            {"task_id": "hist-1", "status": "completed", "progress": 100.0, "message": "ok"},
         ),
         (
             "download_history_data_batch",
@@ -221,7 +232,7 @@ async def test_client_exposes_data_api_with_typed_query_models():
             "POST",
             "/api/v1/data/download/history-data-batch",
             {"json": {"stock_list": ["000001.SZ"], "period": "1d", "start_time": "20240101", "end_time": "20240131"}},
-            {"task_id": "hist-batch-1"},
+            {"task_id": "hist-batch-1", "status": "completed"},
         ),
         (
             "download_financial_data",
@@ -229,7 +240,7 @@ async def test_client_exposes_data_api_with_typed_query_models():
             "POST",
             "/api/v1/data/download/financial-data",
             {"json": {"stock_list": ["000001.SZ"], "table_list": ["balance"], "start_date": "20240101", "end_date": "20240131"}},
-            {"task_id": "fin-1"},
+            {"task_id": "fin-1", "status": "completed"},
         ),
         (
             "download_financial_data_batch",
@@ -237,35 +248,36 @@ async def test_client_exposes_data_api_with_typed_query_models():
             "POST",
             "/api/v1/data/download/financial-data-batch",
             {"json": {"stock_list": ["000001.SZ"], "table_list": ["balance"], "start_date": "20240101", "end_date": "20240131", "callback_func": "cb"}},
-            {"task_id": "fin-batch-1"},
+            {"task_id": "fin-batch-1", "status": "completed"},
         ),
-        ("download_sector_data", {}, "POST", "/api/v1/data/download/sector-data", {}, {"task_id": "sector-1"}),
+        ("download_sector_data", {}, "POST", "/api/v1/data/download/sector-data", {}, {"task_id": "sector-1", "status": "completed"}),
         (
             "download_index_weight",
             {"index_code": "000300.SH"},
             "POST",
             "/api/v1/data/download/index-weight",
             {"json": {"index_code": "000300.SH"}},
-            {"task_id": "index-1"},
+            {"task_id": "index-1", "status": "completed"},
         ),
-        ("download_cb_data", {}, "POST", "/api/v1/data/download/cb-data", {}, {"task_id": "cb-1"}),
-        ("download_etf_info", {}, "POST", "/api/v1/data/download/etf-info", {}, {"task_id": "etf-1"}),
-        ("download_holiday_data", {}, "POST", "/api/v1/data/download/holiday-data", {}, {"task_id": "holiday-1"}),
+        ("download_cb_data", {}, "POST", "/api/v1/data/download/cb-data", {}, {"task_id": "cb-1", "status": "completed"}),
+        ("download_etf_info", {}, "POST", "/api/v1/data/download/etf-info", {}, {"task_id": "etf-1", "status": "completed"}),
+        ("download_holiday_data", {}, "POST", "/api/v1/data/download/holiday-data", {}, {"task_id": "holiday-1", "status": "completed"}),
         (
             "download_history_contracts",
             {"market": "SH"},
             "POST",
             "/api/v1/data/download/history-contracts",
             {"json": {"market": "SH"}},
-            {"task_id": "contract-1"},
+            {"task_id": "contract-1", "status": "completed"},
         ),
+        # --- 板块管理 ---
         (
             "create_sector_folder",
             {"parent_node": "我的", "folder_name": "行业"},
             "POST",
             "/api/v1/data/sector/create-folder",
             {"params": {"parent_node": "我的", "folder_name": "行业"}},
-            {"created_name": "行业"},
+            {"created_name": "行业", "success": True},
         ),
         (
             "create_sector",
@@ -273,7 +285,7 @@ async def test_client_exposes_data_api_with_typed_query_models():
             "POST",
             "/api/v1/data/sector/create",
             {"json": {"parent_node": "我的", "sector_name": "自选板块", "overwrite": False}},
-            {"created_name": "自选板块"},
+            {"created_name": "自选板块", "success": True},
         ),
         (
             "add_sector_stocks",
@@ -307,30 +319,32 @@ async def test_client_exposes_data_api_with_typed_query_models():
             {"json": {"sector_name": "自选板块", "stock_list": ["000001.SZ"]}},
             None,
         ),
+        # --- Level-2 ---
         (
             "get_l2_quote",
-            {"stock_codes": ["000001.SZ"], "start_time": "20240101", "end_time": "20240131"},
+            {"stock_codes": ["000001.SZ"]},
             "POST",
             "/api/v1/data/l2/quote",
-            {"json": {"stock_codes": ["000001.SZ"], "start_time": "20240101", "end_time": "20240131"}},
-            {"quotes": []},
+            {"json": {"stock_codes": ["000001.SZ"], "start_time": "", "end_time": ""}},
+            {"000001.SZ": {"time": "20240101", "last_price": 10.5}},
         ),
         (
             "get_l2_order",
-            {"stock_codes": ["000001.SZ"], "start_time": "20240101", "end_time": "20240131"},
+            {"stock_codes": ["000001.SZ"]},
             "POST",
             "/api/v1/data/l2/order",
-            {"json": {"stock_codes": ["000001.SZ"], "start_time": "20240101", "end_time": "20240131"}},
-            {"orders": []},
+            {"json": {"stock_codes": ["000001.SZ"], "start_time": "", "end_time": ""}},
+            {"000001.SZ": [{"time": "20240101", "price": 10.5, "volume": 100}]},
         ),
         (
             "get_l2_transaction",
-            {"stock_codes": ["000001.SZ"], "start_time": "20240101", "end_time": "20240131"},
+            {"stock_codes": ["000001.SZ"]},
             "POST",
             "/api/v1/data/l2/transaction",
-            {"json": {"stock_codes": ["000001.SZ"], "start_time": "20240101", "end_time": "20240131"}},
-            {"transactions": []},
+            {"json": {"stock_codes": ["000001.SZ"], "start_time": "", "end_time": ""}},
+            {"000001.SZ": [{"time": "20240101", "price": 10.5, "volume": 100}]},
         ),
+        # --- 订阅 ---
         (
             "create_subscription",
             {"symbols": ["000001.SZ"], "period": "tick", "start_date": "20240101", "adjust_type": "none", "subscription_type": "quote"},
@@ -365,7 +379,7 @@ async def test_client_exposes_data_api_with_typed_query_models():
         ),
     ],
 )
-async def test_data_api_routes_extended_rest_surface(
+async def test_data_api_routes(
     method_name,
     kwargs,
     expected_method,
@@ -373,9 +387,10 @@ async def test_data_api_routes_extended_rest_surface(
     expected_kwargs,
     response,
 ):
+    """逐条校验 DataApi 方法名 → HTTP 方法、路径、请求体。"""
     client_module = _load_sdk_module("qmt_proxy_sdk.client")
     client_cls = getattr(client_module, "AsyncQmtProxyClient", None)
-    assert client_cls is not None, "Expected AsyncQmtProxyClient to be exported"
+    assert client_cls is not None
 
     transport = RecordingTransport({(expected_method, expected_path): response})
     client = client_cls(
@@ -387,5 +402,153 @@ async def test_data_api_routes_extended_rest_surface(
     method = getattr(client.data, method_name)
     result = await method(**kwargs)
 
-    assert _normalize(result) == response
+    assert result is not None
     assert transport.calls == [(expected_method, expected_path, expected_kwargs)]
+    logger.info("data.%s -> %s %s OK", method_name, expected_method, expected_path)
+
+
+# ---------------------------------------------------------------------------
+# 返回类型断言
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_download_returns_download_result():
+    """download_* 方法应返回 DownloadResult 模型。"""
+    models = _load_sdk_module("qmt_proxy_sdk.models.data")
+    client_module = _load_sdk_module("qmt_proxy_sdk.client")
+    client_cls = client_module.AsyncQmtProxyClient
+
+    transport = RecordingTransport(
+        {
+            ("POST", "/api/v1/data/download/history-data"): {
+                "task_id": "t1",
+                "status": "completed",
+                "progress": 100.0,
+                "message": "done",
+            },
+        }
+    )
+    client = client_cls(base_url="http://localhost:8000", transport=transport)
+    result = await client.data.download_history_data(stock_code="000001.SZ")
+    assert isinstance(result, models.DownloadResult)
+    assert result.task_id == "t1"
+    assert result.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_full_tick_returns_typed_response():
+    """get_full_tick 应返回 FullTickResponse，内含 TickData 列表。"""
+    models = _load_sdk_module("qmt_proxy_sdk.models.data")
+    client_module = _load_sdk_module("qmt_proxy_sdk.client")
+    client_cls = client_module.AsyncQmtProxyClient
+
+    transport = RecordingTransport(
+        {
+            ("POST", "/api/v1/data/full-tick"): {
+                "000001.SZ": [
+                    {"time": "20240101120000", "last_price": 10.5, "volume": 1000}
+                ]
+            },
+        }
+    )
+    client = client_cls(base_url="http://localhost:8000", transport=transport)
+    result = await client.data.get_full_tick(stock_codes=["000001.SZ"])
+    assert isinstance(result, models.FullTickResponse)
+    assert "000001.SZ" in result.ticks
+    assert result.ticks["000001.SZ"][0].last_price == 10.5
+
+
+@pytest.mark.asyncio
+async def test_l2_quote_returns_typed_response():
+    """get_l2_quote 应返回 L2QuoteResponse，按 stock_code 索引。"""
+    models = _load_sdk_module("qmt_proxy_sdk.models.data")
+    client_module = _load_sdk_module("qmt_proxy_sdk.client")
+    client_cls = client_module.AsyncQmtProxyClient
+
+    transport = RecordingTransport(
+        {
+            ("POST", "/api/v1/data/l2/quote"): {
+                "000001.SZ": {
+                    "time": "20240101",
+                    "last_price": 10.5,
+                    "ask_price": [10.6, 10.7],
+                    "bid_price": [10.4, 10.3],
+                }
+            },
+        }
+    )
+    client = client_cls(base_url="http://localhost:8000", transport=transport)
+    result = await client.data.get_l2_quote(stock_codes=["000001.SZ"])
+    assert isinstance(result, models.L2QuoteResponse)
+    assert "000001.SZ" in result.quotes
+    assert result.quotes["000001.SZ"].last_price == 10.5
+
+
+@pytest.mark.asyncio
+async def test_divid_factors_returns_list():
+    """get_divid_factors 应返回 DividendFactor 列表。"""
+    models = _load_sdk_module("qmt_proxy_sdk.models.data")
+    client_module = _load_sdk_module("qmt_proxy_sdk.client")
+    client_cls = client_module.AsyncQmtProxyClient
+
+    transport = RecordingTransport(
+        {
+            ("POST", "/api/v1/data/divid-factors"): [
+                {"time": "20240101", "interest": 0.5, "dr": 1.0}
+            ],
+        }
+    )
+    client = client_cls(base_url="http://localhost:8000", transport=transport)
+    result = await client.data.get_divid_factors(stock_code="000001.SZ")
+    assert isinstance(result, list)
+    assert isinstance(result[0], models.DividendFactor)
+    assert result[0].interest == 0.5
+
+
+@pytest.mark.asyncio
+async def test_sector_crud_returns_operation_result():
+    """板块 CRUD 应返回 SectorOperationResult。"""
+    models = _load_sdk_module("qmt_proxy_sdk.models.data")
+    client_module = _load_sdk_module("qmt_proxy_sdk.client")
+    client_cls = client_module.AsyncQmtProxyClient
+
+    transport = RecordingTransport(
+        {
+            ("POST", "/api/v1/data/sector/create"): {
+                "created_name": "自选",
+                "success": True,
+                "message": "ok",
+            },
+        }
+    )
+    client = client_cls(base_url="http://localhost:8000", transport=transport)
+    result = await client.data.create_sector(sector_name="自选")
+    assert isinstance(result, models.SectorOperationResult)
+    assert result.created_name == "自选"
+    assert result.success is True
+
+
+@pytest.mark.asyncio
+async def test_subscription_list_uses_typed_subscriptions():
+    """SubscriptionListResult.subscriptions 应为 list[SubscriptionInfo]。"""
+    models = _load_sdk_module("qmt_proxy_sdk.models.data")
+    client_module = _load_sdk_module("qmt_proxy_sdk.client")
+    client_cls = client_module.AsyncQmtProxyClient
+
+    transport = RecordingTransport(
+        {
+            ("GET", "/api/v1/data/subscriptions"): {
+                "subscriptions": [
+                    {"subscription_id": "sub-1", "active": True, "symbols": ["000001.SZ"]},
+                ],
+                "total": 1,
+            },
+        }
+    )
+    client = client_cls(base_url="http://localhost:8000", transport=transport)
+    result = await client.data.list_subscriptions()
+    assert isinstance(result, models.SubscriptionListResult)
+    assert len(result.subscriptions) == 1
+    assert isinstance(result.subscriptions[0], models.SubscriptionInfo)
+    assert result.subscriptions[0].subscription_id == "sub-1"

@@ -1,9 +1,25 @@
+"""
+TradingApi 测试（对应 libs/qmt_proxy_sdk/trading.py 与 app/routers/trading.py）。
+
+路由与业务含义（均以 verify_api_key 保护）：
+- POST /api/v1/trading/connect：connect_account，返回 ConnectResponse（会话与账户摘要）。
+- POST /api/v1/trading/disconnect/{session_id}：disconnect_account，format_response 包 data.success。
+- GET /account|positions|asset|risk|strategies|orders|trades/{session_id}：查询账户、持仓、资产、风险、策略、委托、成交。
+- POST /order/{session_id}、POST /cancel/{session_id}：下单与撤单；撤单响应为信封内 data.success。
+- GET /status/{session_id}：is_connected，format_response 包 data.connected。
+
+RecordingTransport 返回的 dict 与「经 AsyncHttpTransport 解包后」一致：直接模型或信封内 data。
+"""
+
 import importlib
 import importlib.util
+import logging
 import sys
 from pathlib import Path
 
 import pytest
+
+logger = logging.getLogger(__name__)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +36,8 @@ def _load_sdk_module(module_name: str):
 
 
 class RecordingTransport:
+    """记录 (method, path, kwargs) 并按表返回模拟响应。"""
+
     def __init__(self, responses):
         self.responses = responses
         self.calls = []
@@ -33,6 +51,7 @@ class RecordingTransport:
 
 
 def _normalize(value):
+    """与 SDK 模型 JSON 模式对齐，便于与原始 dict 断言相等。"""
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json", exclude_none=True)
     if isinstance(value, list):
@@ -42,6 +61,15 @@ def _normalize(value):
 
 @pytest.mark.asyncio
 async def test_client_exposes_trading_api_with_typed_models():
+    """
+    串联覆盖主要只读与连接流程，与 trading 路由一一对应：
+
+    connect → POST /connect；get_account_info → GET /account/{session_id}；
+    get_positions → GET /positions/...；get_asset → GET /asset/...；get_risk → GET /risk/...；
+    get_strategies → GET /strategies/...；get_orders → GET /orders/...；get_trades → GET /trades/...。
+
+    响应字段形状需满足 trading_models 中 ConnectResponse、AccountInfo、PositionInfo 等定义（测试用最小合法样例）。
+    """
     client_module = _load_sdk_module("qmt_proxy_sdk.client")
     client_cls = getattr(client_module, "AsyncQmtProxyClient", None)
     assert client_cls is not None, "Expected AsyncQmtProxyClient to be exported"
@@ -169,12 +197,19 @@ async def test_client_exposes_trading_api_with_typed_models():
     assert strategies[0].strategy_name == "grid"
     assert orders[0].order_id == "order-001"
     assert trades[0].trade_id == "trade-001"
+    logger.info(
+        "trading 串联: session=%s positions=%d orders=%d",
+        connect.session_id,
+        len(positions),
+        len(orders),
+    )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("method_name", "kwargs", "expected_method", "expected_path", "expected_kwargs", "response"),
     [
+        # POST /connect — trading.connect_account，请求体 ConnectRequest（account_id、password 等）
         (
             "connect",
             {"account_id": "acct-001", "password": "secret"},
@@ -187,6 +222,7 @@ async def test_client_exposes_trading_api_with_typed_models():
                 "session_id": "session-001",
             },
         ),
+        # POST /disconnect/{session_id} — 成功时 format_response data 含 success；SDK 解包后为 {"success": bool}
         (
             "disconnect",
             {"session_id": "session-001"},
@@ -195,6 +231,7 @@ async def test_client_exposes_trading_api_with_typed_models():
             {},
             {"success": True},
         ),
+        # POST /order/{session_id} — submit_order，请求体 OrderRequest
         (
             "submit_order",
             {
@@ -222,6 +259,7 @@ async def test_client_exposes_trading_api_with_typed_models():
                 "filled_amount": 0.0,
             },
         ),
+        # POST /cancel/{session_id} — cancel_order，请求体 CancelOrderRequest(order_id)；响应信封 data.success
         (
             "cancel_order",
             {"session_id": "session-001", "order_id": "order-001"},
@@ -230,6 +268,7 @@ async def test_client_exposes_trading_api_with_typed_models():
             {"json": {"order_id": "order-001"}},
             {"success": True},
         ),
+        # GET /status/{session_id} — get_connection_status，返回 data.connected
         (
             "get_connection_status",
             {"session_id": "session-001"},
@@ -248,6 +287,11 @@ async def test_trading_api_routes_and_payloads(
     expected_kwargs,
     response,
 ):
+    """
+    参数化校验 TradingApi 各方法与 REST 方法、路径、json/params 及返回解析一致。
+
+    response 为 transport 层所见载荷（已与生产上 AsyncHttpTransport 解包行为对齐的 dict）。
+    """
     client_module = _load_sdk_module("qmt_proxy_sdk.client")
     client_cls = getattr(client_module, "AsyncQmtProxyClient", None)
     assert client_cls is not None, "Expected AsyncQmtProxyClient to be exported"
@@ -264,3 +308,4 @@ async def test_trading_api_routes_and_payloads(
 
     assert _normalize(result) == response
     assert transport.calls == [(expected_method, expected_path, expected_kwargs)]
+    logger.info("trading.%s -> %s %s", method_name, expected_method, expected_path)

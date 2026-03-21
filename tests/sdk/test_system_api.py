@@ -1,9 +1,24 @@
+"""
+SystemApi 与根路径、应用信息测试（对应 libs/qmt_proxy_sdk/system.py）。
+
+服务端对应关系：
+- GET /health/、/health/ready、/health/live：app.routers.health，均经 format_response 返回信封；
+  真实客户端由 AsyncHttpTransport 解包后得到 data，再校验为 HealthStatus / ServiceStatus。
+- GET /、GET /info：app.main.root 与 app_info，同样为 format_response；data 字段与 RootInfo、AppInfo 模型对齐。
+
+本文件 RecordingTransport 返回的是「与解包后一致的 dict」，用于隔离测试 Pydantic 解析与请求路径，
+不启动 uvicorn。
+"""
+
 import importlib
 import importlib.util
+import logging
 import sys
 from pathlib import Path
 
 import pytest
+
+logger = logging.getLogger(__name__)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +35,8 @@ def _load_sdk_module(module_name: str):
 
 
 class RecordingTransport:
+    """按 (method, path) 返回预置响应，并记录调用；模拟已解包的业务 JSON（无信封外层）。"""
+
     def __init__(self, responses):
         self.responses = responses
         self.calls = []
@@ -34,6 +51,15 @@ class RecordingTransport:
 
 @pytest.mark.asyncio
 async def test_client_exposes_system_api_with_typed_health_responses():
+    """
+    串联调用 check_health / check_ready / check_live，对应三条健康路由：
+
+    - health_check：返回 status、app_name、app_version、xtquant_mode、timestamp（见 health.py）。
+    - readiness_check：data.status == "ready"。
+    - liveness_check：data.status == "alive"。
+
+    断言 transport 调用顺序与路径与健康路由前缀 /health 一致。
+    """
     client_module = _load_sdk_module("qmt_proxy_sdk.client")
     client_cls = getattr(client_module, "AsyncQmtProxyClient", None)
     assert client_cls is not None, "Expected AsyncQmtProxyClient to be exported"
@@ -70,10 +96,22 @@ async def test_client_exposes_system_api_with_typed_health_responses():
         ("GET", "/health/ready", {}),
         ("GET", "/health/live", {}),
     ]
+    logger.info(
+        "system: health=%s ready=%s live=%s",
+        health.status,
+        ready.status,
+        live.status,
+    )
 
 
 @pytest.mark.asyncio
 async def test_system_api_returns_root_and_app_info_models():
+    """
+    get_root：对应 app.main.root，data 含 app_name、app_version、xtquant_mode、description、docs_url、redoc_url。
+
+    get_info：对应 app.main.app_info，data 含 name、version、debug、host、port、log_level、
+    xtquant_mode、allow_real_trading（来自 settings.xtquant.trading.allow_real_trading）。
+    """
     client_module = _load_sdk_module("qmt_proxy_sdk.client")
     client_cls = getattr(client_module, "AsyncQmtProxyClient", None)
     assert client_cls is not None, "Expected AsyncQmtProxyClient to be exported"
@@ -113,3 +151,4 @@ async def test_system_api_returns_root_and_app_info_models():
     assert root_info.redoc_url == "/redoc"
     assert app_info.name == "xtquant-proxy"
     assert app_info.allow_real_trading is False
+    logger.info("get_root docs_url=%s get_info allow_real_trading=%s", root_info.docs_url, app_info.allow_real_trading)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class MarketDataResponse(BaseModel):
@@ -140,6 +140,9 @@ class DataDirResponse(BaseModel):
     data_dir: str = Field(..., description="本地数据路径")
 
 
+# ==================== 订阅相关模型 ====================
+
+
 class SubscriptionCreateResult(BaseModel):
     subscription_id: str
     status: str
@@ -162,33 +165,225 @@ class SubscriptionInfo(BaseModel):
     subscription_id: str
     active: bool
     symbols: list[str] | None = None
+    period: str | None = None
+    start_date: str | None = None
     adjust_type: str | None = None
     subscription_type: str | None = None
     created_at: str | None = None
     last_heartbeat: str | None = None
     queue_size: int | None = None
+    subids_xtquant: list[int] | None = None
 
 
 class SubscriptionListResult(BaseModel):
-    subscriptions: list[Any]
+    subscriptions: list[SubscriptionInfo]
     total: int
+
+
+# ==================== WebSocket 行情模型 ====================
+
+
+class QuoteData(BaseModel):
+    """实时行情数据（WebSocket 推送）。
+
+    已知字段使用强类型，xtdata 返回的额外字段通过 ``model_extra`` 访问。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    stock_code: str | None = None
+    timestamp: str | None = None
+    last_price: float | None = None
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    volume: int | None = None
+    amount: float | None = None
+    pre_close: float | None = None
+    bid_price: list[float] | None = None
+    ask_price: list[float] | None = None
+    bid_vol: list[int] | None = None
+    ask_vol: list[int] | None = None
+
+
+# ==================== Tick / K线 / 除权 模型 ====================
+
+
+class TickData(BaseModel):
+    """Tick 快照数据。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    time: str
+    last_price: float
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    last_close: float | None = None
+    amount: float | None = None
+    volume: int | None = None
+    pvolume: int | None = None
+    stock_status: int | None = None
+    open_int: int | None = None
+    last_settlement_price: float | None = None
+    ask_price: list[float] | None = None
+    bid_price: list[float] | None = None
+    ask_vol: list[int] | None = None
+    bid_vol: list[int] | None = None
+    transaction_num: int | None = None
+
+
+class FullTickResponse(BaseModel):
+    """get_full_tick 返回：stock_code → tick 数据列表。"""
+
+    ticks: Dict[str, List[TickData]]
+
+
+class DividendFactor(BaseModel):
+    """除权除息因子。"""
+
+    time: str
+    interest: float | None = None
+    stock_bonus: float | None = None
+    stock_gift: float | None = None
+    allot_num: float | None = None
+    allot_price: float | None = None
+    gugai: int | None = None
+    dr: float | None = None
+
+
+# ==================== 下载 / 板块操作通用结果 ====================
+
+
+class DownloadResult(BaseModel):
+    """数据下载操作结果。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    task_id: str | None = None
+    status: str | None = None
+    progress: float | None = None
+    total: int | None = None
+    finished: int | None = None
+    message: str | None = None
+    current_stock: str | None = None
+
+
+class SectorOperationResult(BaseModel):
+    """板块 CRUD 操作结果。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    created_name: str | None = None
+    success: bool | None = None
+    message: str | None = None
+
+
+# ==================== Level-2 数据模型 ====================
+
+
+class L2QuoteData(BaseModel):
+    """Level-2 快照行情（10 档盘口）。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    time: str
+    last_price: float
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    amount: float | None = None
+    volume: int | None = None
+    pvolume: int | None = None
+    open_int: int | None = None
+    stock_status: int | None = None
+    transaction_num: int | None = None
+    last_close: float | None = None
+    last_settlement_price: float | None = None
+    settlement_price: float | None = None
+    pe: float | None = None
+    ask_price: list[float] | None = None
+    bid_price: list[float] | None = None
+    ask_vol: list[int] | None = None
+    bid_vol: list[int] | None = None
+
+
+class L2OrderData(BaseModel):
+    """Level-2 逐笔委托。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    time: str
+    price: float
+    volume: int
+    entrust_no: int | None = None
+    entrust_type: int | None = None
+    entrust_direction: int | None = None
+
+
+class L2TransactionData(BaseModel):
+    """Level-2 逐笔成交。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    time: str
+    price: float
+    volume: int
+    amount: float | None = None
+    trade_index: int | None = None
+    buy_no: int | None = None
+    sell_no: int | None = None
+    trade_type: int | None = None
+    trade_flag: int | None = None
+
+
+class L2QuoteResponse(BaseModel):
+    """get_l2_quote 返回：stock_code → L2QuoteData。"""
+
+    quotes: Dict[str, L2QuoteData]
+
+
+class L2OrderResponse(BaseModel):
+    """get_l2_order 返回：stock_code → 委托列表。"""
+
+    orders: Dict[str, List[L2OrderData]]
+
+
+class L2TransactionResponse(BaseModel):
+    """get_l2_transaction 返回：stock_code → 成交列表。"""
+
+    transactions: Dict[str, List[L2TransactionData]]
+
 
 __all__ = [
     "ConvertibleBondInfo",
     "DataDirResponse",
+    "DividendFactor",
+    "DownloadResult",
     "ETFInfoResponse",
     "FinancialDataResponse",
+    "FullTickResponse",
     "HolidayInfo",
     "IndexWeightResponse",
     "InstrumentInfo",
     "InstrumentTypeInfo",
     "IpoInfo",
+    "L2OrderData",
+    "L2OrderResponse",
+    "L2QuoteData",
+    "L2QuoteResponse",
+    "L2TransactionData",
+    "L2TransactionResponse",
     "MarketDataResponse",
     "PeriodListResponse",
+    "QuoteData",
+    "SectorOperationResult",
     "SectorResponse",
     "SubscriptionCreateResult",
     "SubscriptionDeleteResult",
     "SubscriptionInfo",
     "SubscriptionListResult",
+    "TickData",
     "TradingCalendarResponse",
 ]
