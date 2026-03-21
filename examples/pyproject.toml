@@ -1,0 +1,19 @@
+[project]
+name = "qmt-proxy-examples"
+version = "0.1.0"
+description = "QMT Proxy SDK 使用示例"
+requires-python = ">=3.12"
+dependencies = [
+    "qmt-proxy-sdk",
+]
+
+[tool.uv.sources]
+qmt-proxy-sdk = { path = "../libs/qmt_proxy_sdk", editable = true }
+
+[tool.uv]
+python-preference = "managed"
+
+[[tool.uv.index]]
+name = "tsinghua"
+url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+default = true
