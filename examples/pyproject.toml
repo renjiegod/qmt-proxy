@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "QMT Proxy SDK 使用示例"
 requires-python = ">=3.12"
 dependencies = [
+    "python-dotenv",
     "qmt-proxy-sdk",
 ]
 

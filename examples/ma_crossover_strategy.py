@@ -41,7 +41,9 @@ import sys
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 
+from dotenv import load_dotenv
 from qmt_proxy_sdk import AsyncQmtProxyClient, QmtProxyError
 
 # ---------------------------------------------------------------------------
@@ -59,10 +61,20 @@ log = logging.getLogger("策略")
 # 策略参数
 # ---------------------------------------------------------------------------
 
-BASE_URL = os.getenv("QMT_PROXY_URL", "http://localhost:8000")
-API_KEY = os.getenv("QMT_API_KEY", "dev-api-key-001")
+EXAMPLE_ENV_PATH = Path(__file__).with_name(".env")
+DEFAULT_BASE_URL = "http://localhost:8000"
+DEFAULT_API_KEY = "dev-api-key-001"
 DEFAULT_ACCOUNT_ID = "test_account"
-ACCOUNT_ID = os.getenv("QMT_ACCOUNT_ID", DEFAULT_ACCOUNT_ID)
+
+
+def resolve_runtime_settings(env_path: Path | None = None) -> dict[str, str]:
+    """加载 examples/.env，并保留已存在的环境变量优先级。"""
+    load_dotenv(dotenv_path=env_path or EXAMPLE_ENV_PATH, override=False)
+    return {
+        "base_url": os.getenv("QMT_PROXY_URL", DEFAULT_BASE_URL),
+        "api_key": os.getenv("QMT_API_KEY", DEFAULT_API_KEY),
+        "account_id": os.getenv("QMT_ACCOUNT_ID", DEFAULT_ACCOUNT_ID),
+    }
 
 SHORT_MA_PERIOD = 5
 LONG_MA_PERIOD = 20
@@ -370,18 +382,18 @@ async def screen_stocks(client: AsyncQmtProxyClient) -> list[str]:
 
 
 async def connect_trading(
-    client: AsyncQmtProxyClient, target_count: int
+    client: AsyncQmtProxyClient, target_count: int, account_id: str
 ) -> tuple[str, PositionManager]:
     log.info("")
     log.info("=" * 60)
     log.info("阶段 3：建立交易会话 & 初始化仓位管理")
     log.info("=" * 60)
 
-    resp = await client.trading.connect(account_id=ACCOUNT_ID)
+    resp = await client.trading.connect(account_id=account_id)
     log.info("连接结果: success=%s | message=%s", resp.success, resp.message)
 
     if not resp.success or not resp.session_id:
-        raise RuntimeError(format_connect_failure_message(ACCOUNT_ID, resp.message))
+        raise RuntimeError(format_connect_failure_message(account_id, resp.message))
 
     session_id = resp.session_id
     log.info("会话 ID: %s", session_id)
@@ -760,11 +772,16 @@ async def finalize(client: AsyncQmtProxyClient, session_id: str) -> None:
 
 
 async def main() -> None:
+    runtime_settings = resolve_runtime_settings()
+    base_url = runtime_settings["base_url"]
+    api_key = runtime_settings["api_key"]
+    account_id = runtime_settings["account_id"]
+
     log.info("╔══════════════════════════════════════════════════════════╗")
     log.info("║       QMT Proxy SDK — 双均线交叉量化交易策略示例        ║")
     log.info("╚══════════════════════════════════════════════════════════╝")
-    log.info("服务地址: %s", BASE_URL)
-    log.info("交易账户: %s", ACCOUNT_ID)
+    log.info("服务地址: %s", base_url)
+    log.info("交易账户: %s", account_id)
     log.info(
         "策略参数: MA%d / MA%d | 选股天数=%d | 最大持仓=%d",
         SHORT_MA_PERIOD,
@@ -780,7 +797,7 @@ async def main() -> None:
     )
     log.info("")
 
-    async with AsyncQmtProxyClient(base_url=BASE_URL, api_key=API_KEY) as client:
+    async with AsyncQmtProxyClient(base_url=base_url, api_key=api_key) as client:
         # 阶段 1：健康检查
         await check_service(client)
 
@@ -788,7 +805,7 @@ async def main() -> None:
         targets = await screen_stocks(client)
 
         # 阶段 3：建立交易连接 & 初始化仓位管理
-        session_id, pm = await connect_trading(client, target_count=len(targets))
+        session_id, pm = await connect_trading(client, target_count=len(targets), account_id=account_id)
 
         # 阶段 4 & 5：实时监听 + 策略执行
         try:

@@ -9,6 +9,7 @@ if str(LIBS_ROOT) not in sys.path:
 
 from qmt_proxy_sdk.models.data import QuoteData
 
+import examples.ma_crossover_strategy as ma_strategy
 from examples.ma_crossover_strategy import format_connect_failure_message, format_tick_log_line
 
 
@@ -95,3 +96,45 @@ def test_format_connect_failure_message_keeps_non_placeholder_errors_unchanged()
     message = format_connect_failure_message("acct-001", "xttrader 未初始化或未连接")
 
     assert message == "交易连接失败: xttrader 未初始化或未连接"
+
+
+def test_resolve_runtime_settings_reads_values_from_example_env_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("QMT_PROXY_URL", raising=False)
+    monkeypatch.delenv("QMT_API_KEY", raising=False)
+    monkeypatch.delenv("QMT_ACCOUNT_ID", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "QMT_PROXY_URL=http://env-file:9000\n"
+        "QMT_API_KEY=env-file-key\n"
+        "QMT_ACCOUNT_ID=env-file-account\n",
+        encoding="utf-8",
+    )
+
+    assert hasattr(ma_strategy, "resolve_runtime_settings")
+
+    settings = ma_strategy.resolve_runtime_settings(env_path=env_file)
+
+    assert settings["base_url"] == "http://env-file:9000"
+    assert settings["api_key"] == "env-file-key"
+    assert settings["account_id"] == "env-file-account"
+
+
+def test_resolve_runtime_settings_prefers_existing_environment_over_env_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("QMT_PROXY_URL", "http://from-env:8000")
+    monkeypatch.setenv("QMT_API_KEY", "shell-key")
+    monkeypatch.setenv("QMT_ACCOUNT_ID", "shell-account")
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "QMT_PROXY_URL=http://env-file:9000\n"
+        "QMT_API_KEY=env-file-key\n"
+        "QMT_ACCOUNT_ID=env-file-account\n",
+        encoding="utf-8",
+    )
+
+    assert hasattr(ma_strategy, "resolve_runtime_settings")
+
+    settings = ma_strategy.resolve_runtime_settings(env_path=env_file)
+
+    assert settings["base_url"] == "http://from-env:8000"
+    assert settings["api_key"] == "shell-key"
+    assert settings["account_id"] == "shell-account"
