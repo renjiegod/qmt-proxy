@@ -60,6 +60,43 @@ function Ensure-Uv {
     Invoke-CheckedCommand -FilePath $PythonExe -Arguments @("-m", "pip", "install", "uv")
 }
 
+function Use-ProjectVirtualEnv {
+    $env:UV_PROJECT_ENVIRONMENT = Join-Path $ProjectRoot ".venv-windows"
+
+    $sharedVenvPath = Join-Path $ProjectRoot ".venv"
+    if (-not (Test-Path $sharedVenvPath)) {
+        return
+    }
+
+    $reasons = [System.Collections.Generic.List[string]]::new()
+    $windowsPython = Join-Path $sharedVenvPath "Scripts\\python.exe"
+    $unixBinDir = Join-Path $sharedVenvPath "bin"
+    $pyvenvCfg = Join-Path $sharedVenvPath "pyvenv.cfg"
+
+    if (Test-Path $unixBinDir) {
+        [void]$reasons.Add("contains a Unix-style 'bin' directory")
+    }
+
+    if (-not (Test-Path $windowsPython)) {
+        [void]$reasons.Add("is missing 'Scripts\\python.exe'")
+    }
+
+    if (Test-Path $pyvenvCfg) {
+        $pyvenvContents = Get-Content $pyvenvCfg -Raw
+        if ($pyvenvContents -match "(?m)^home\s*=\s*/") {
+            [void]$reasons.Add("was created from a non-Windows Python home")
+        }
+    }
+
+    if ($reasons.Count -eq 0) {
+        return
+    }
+
+    Write-Host "Detected an incompatible shared virtualenv at $sharedVenvPath."
+    Write-Host "Reasons: $($reasons -join '; ')"
+    Write-Host "Using Windows project virtualenv at $($env:UV_PROJECT_ENVIRONMENT) instead."
+}
+
 function Get-ServiceProcess {
     if (-not (Test-Path $PidFile)) {
         return $null
@@ -172,6 +209,7 @@ function Start-ForegroundProcess {
         return
     }
 
+    Use-ProjectVirtualEnv
     Prepare-ServiceStart
 
     $env:APP_MODE = $AppMode
@@ -191,6 +229,7 @@ function Start-BackgroundServiceProcess {
         return
     }
 
+    Use-ProjectVirtualEnv
     Prepare-ServiceStart
 
     New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
@@ -325,10 +364,12 @@ try {
         "install" {
             Ensure-Uv
             Invoke-CheckedCommand -FilePath $PythonExe -Arguments @("-m", "uv", "python", "install", $PythonVersion)
+            Use-ProjectVirtualEnv
             Invoke-CheckedCommand -FilePath $PythonExe -Arguments @("-m", "uv", "sync", "--no-install-project", "--python", $PythonVersion)
         }
         "sync" {
             Ensure-Uv
+            Use-ProjectVirtualEnv
             Invoke-CheckedCommand -FilePath $PythonExe -Arguments @("-m", "uv", "sync", "--no-install-project", "--python", $PythonVersion)
         }
         "lock" {
