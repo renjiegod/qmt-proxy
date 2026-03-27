@@ -4,7 +4,9 @@
 import os
 import sys
 from datetime import datetime
-from typing import List
+from types import SimpleNamespace
+from typing import Any, List, Optional
+
 from app.utils.logger import logger
 
 # 添加xtquant包到Python路径
@@ -13,8 +15,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 try:
     import xtquant.xttrader as xttrader
     from xtquant import xtconstant
+    from xtquant.xttrader import XtQuantTrader
+    from xtquant.xttype import StockAccount
+
     XTQUANT_AVAILABLE = True
-except ImportError as e:
+except ImportError:
     logger.error("xtquant模块未正确安装")
     XTQUANT_AVAILABLE = False
     # 创建模拟模块以避免导入错误
@@ -26,6 +31,8 @@ except ImportError as e:
     
     xttrader = MockModule()
     xtconstant = MockModule()
+    XtQuantTrader = MockModule
+    StockAccount = MockModule
 
 from app.config import Settings, XTQuantMode
 from app.models.trading_models import (
@@ -37,6 +44,7 @@ from app.models.trading_models import (
     ConnectResponse,
     OrderRequest,
     OrderResponse,
+    OrderSide,
     OrderStatus,
     PositionInfo,
     RiskInfo,
@@ -45,7 +53,6 @@ from app.models.trading_models import (
 )
 from app.utils.exceptions import TradingServiceException
 from app.utils.helpers import validate_stock_code
-from app.utils.logger import logger
 
 
 class TradingService:
@@ -59,6 +66,7 @@ class TradingService:
         self._orders = {}
         self._trades = {}
         self._order_counter = 1000
+        self._xt_trader = None
         self._try_initialize()
     
     def _try_initialize(self):
@@ -72,12 +80,27 @@ class TradingService:
             return
         
         try:
-            # 初始化xttrader
-            # xttrader.connect()
+            qmt_path = self.settings.xtquant.data.qmt_userdata_path
+            if not qmt_path:
+                logger.warning("未配置 qmt_userdata_path，无法初始化 xttrader")
+                self._initialized = False
+                return
+
+            trader_session = int(datetime.now().timestamp() * 1000) % 2147483647
+            self._xt_trader = XtQuantTrader(qmt_path, trader_session)
+            if hasattr(self._xt_trader, "start"):
+                self._xt_trader.start()
+            connect_result = self._xt_trader.connect()
+            if connect_result != 0:
+                logger.warning(f"xttrader 连接失败，返回码: {connect_result}")
+                self._xt_trader = None
+                self._initialized = False
+                return
             self._initialized = True
             logger.info("xttrader 已初始化")
         except Exception as e:
             logger.warning(f"xttrader 初始化失败: {e}")
+            self._xt_trader = None
             self._initialized = False
     
     def _should_use_real_trading(self) -> bool:
@@ -98,32 +121,434 @@ class TradingService:
         return (            
             self.settings.xtquant.mode in [XTQuantMode.DEV, XTQuantMode.PROD]
         )
+
+    def _require_real_trading_backend(self):
+        """确保真实交易后端可用于只读查询或真实交易。"""
+        if not XTQUANT_AVAILABLE:
+            raise TradingServiceException("xttrader 不可用，请确认 xtquant 已安装")
+        if not self._initialized:
+            raise TradingServiceException("xttrader 未初始化或未连接")
+
+    def _get_trader(self):
+        """获取真实交易客户端。"""
+        self._require_real_trading_backend()
+        if self._xt_trader is None:
+            raise TradingServiceException("xttrader 后端未就绪")
+        return self._xt_trader
+
+    def _new_session_id(self, account_id: str) -> str:
+        return f"session_{account_id}_{datetime.now().timestamp()}"
+
+    def _get_attr(self, obj: Any, *names: str, default: Any = None) -> Any:
+        for name in names:
+            if isinstance(obj, dict) and name in obj:
+                value = obj[name]
+            else:
+                value = getattr(obj, name, None)
+            if value is not None:
+                return value
+        return default
+
+    def _to_float(self, value: Any, default: Optional[float] = None) -> Optional[float]:
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _to_int(self, value: Any, default: Optional[int] = None) -> Optional[int]:
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _parse_datetime(self, value: Any) -> datetime:
+        if isinstance(value, datetime):
+            return value
+        if value is None:
+            return datetime.now()
+
+        text = str(value).strip()
+        for fmt in ("%Y%m%d%H%M%S", "%Y-%m-%d %H:%M:%S", "%H%M%S"):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                if fmt == "%H%M%S":
+                    return datetime.combine(datetime.now().date(), parsed.time())
+                return parsed
+            except ValueError:
+                continue
+
+        try:
+            return datetime.fromtimestamp(float(value))
+        except (TypeError, ValueError, OSError):
+            return datetime.now()
+
+    def _normalize_account_type(self, value: Any) -> AccountType:
+        if isinstance(value, AccountType):
+            return value
+        if isinstance(value, str):
+            normalized = value.upper()
+            if normalized == "STOCK":
+                return AccountType.SECURITY
+            for account_type in AccountType:
+                if account_type.value == normalized:
+                    return account_type
+        return AccountType.SECURITY
+
+    def _get_mock_account_info(self, account_id: str) -> AccountInfo:
+        return AccountInfo(
+            account_id=account_id,
+            account_type=AccountType.SECURITY,
+            account_name=f"账户{account_id}",
+            status="CONNECTED",
+            balance=1000000.0,
+            available_balance=950000.0,
+            frozen_balance=50000.0,
+            market_value=800000.0,
+            total_asset=1800000.0
+        )
+
+    def _store_mock_session(self, account_id: str, account_info: AccountInfo) -> str:
+        session_id = self._new_session_id(account_id)
+        self._connected_accounts[session_id] = {
+            "account_id": account_id,
+            "account_type": account_info.account_type.value,
+            "account_info": account_info,
+            "connected_time": datetime.now(),
+        }
+        return session_id
+
+    def _get_session_context(self, session_id: str) -> dict:
+        context = self._connected_accounts.get(session_id)
+        if context is None:
+            raise TradingServiceException("账户未连接")
+        return context
+
+    def _get_real_session_context(self, session_id: str) -> dict:
+        context = self._get_session_context(session_id)
+        if not self._should_use_real_data():
+            return context
+
+        self._require_real_trading_backend()
+        if context.get("account") is None:
+            raise TradingServiceException("真实账户上下文缺失，请重新连接账户")
+        return context
+
+    def _connect_real_account(self, request: ConnectRequest):
+        account = StockAccount(request.account_id)
+        subscribe_result = self._get_trader().subscribe(account)
+        if subscribe_result != 0:
+            raise TradingServiceException(f"订阅交易账户失败，返回码: {subscribe_result}")
+        return account
+
+    def _query_all_account_infos(self):
+        trader = self._get_trader()
+        if not hasattr(trader, "query_account_infos"):
+            return []
+        account_infos = trader.query_account_infos()
+        return account_infos or []
+
+    def _build_account_snapshot(self, account) -> SimpleNamespace:
+        asset = self._get_trader().query_stock_asset(account)
+        if asset is None:
+            raise TradingServiceException("从QMT查询账户资产失败")
+
+        raw_account_info = None
+        for item in self._query_all_account_infos():
+            if self._get_attr(item, "account_id") == getattr(account, "account_id", None):
+                raw_account_info = item
+                break
+
+        available_balance = self._to_float(
+            self._get_attr(asset, "available_cash", "cash", "enableBalance"),
+            0.0,
+        ) or 0.0
+        frozen_balance = self._to_float(
+            self._get_attr(asset, "frozen_cash", "frozen_balance"),
+            0.0,
+        ) or 0.0
+        total_asset = self._to_float(
+            self._get_attr(asset, "total_asset", "assetBalance", "current_balance"),
+            0.0,
+        ) or 0.0
+        market_value = self._to_float(
+            self._get_attr(asset, "market_value", "marketValue"),
+            0.0,
+        ) or 0.0
+        balance = self._to_float(
+            self._get_attr(asset, "current_balance", "balance"),
+            available_balance + frozen_balance,
+        ) or (available_balance + frozen_balance)
+
+        return SimpleNamespace(
+            account_id=self._get_attr(raw_account_info, "account_id", default=getattr(account, "account_id", "")),
+            account_type=self._get_attr(raw_account_info, "account_type", default=getattr(account, "account_type", "STOCK")),
+            account_name=self._get_attr(raw_account_info, "account_name", default=f"账户{getattr(account, 'account_id', '')}"),
+            status=self._get_attr(raw_account_info, "login_status", "status", default="CONNECTED"),
+            balance=balance,
+            available_balance=available_balance,
+            frozen_balance=frozen_balance,
+            market_value=market_value,
+            total_asset=total_asset,
+        )
+
+    def _build_account_info_from_real_account(self, account) -> AccountInfo:
+        return self._map_account_info(self._build_account_snapshot(account))
+
+    def _store_real_session(self, request: ConnectRequest, account, account_info: AccountInfo) -> str:
+        session_id = self._new_session_id(request.account_id)
+        self._connected_accounts[session_id] = {
+            "account_id": request.account_id,
+            "account_type": account_info.account_type.value,
+            "account": account,
+            "account_info": account_info,
+            "connected_time": datetime.now(),
+        }
+        return session_id
+
+    def _query_real_account_info(self, session_id: str):
+        context = self._get_real_session_context(session_id)
+        return self._build_account_snapshot(context["account"])
+
+    def _map_account_info(self, raw_account) -> AccountInfo:
+        account_id = self._get_attr(raw_account, "account_id")
+        total_asset = self._to_float(self._get_attr(raw_account, "total_asset"))
+        if not account_id or total_asset is None:
+            raise TradingServiceException("无法映射QMT账户信息")
+
+        available_balance = self._to_float(self._get_attr(raw_account, "available_balance", "cash"), 0.0) or 0.0
+        frozen_balance = self._to_float(self._get_attr(raw_account, "frozen_balance", "frozen_cash"), 0.0) or 0.0
+        balance = self._to_float(self._get_attr(raw_account, "balance"), available_balance + frozen_balance)
+        market_value = self._to_float(self._get_attr(raw_account, "market_value"), 0.0) or 0.0
+
+        return AccountInfo(
+            account_id=account_id,
+            account_type=self._normalize_account_type(self._get_attr(raw_account, "account_type")),
+            account_name=self._get_attr(raw_account, "account_name", default=f"账户{account_id}"),
+            status=str(self._get_attr(raw_account, "status", default="CONNECTED")),
+            balance=balance if balance is not None else available_balance + frozen_balance,
+            available_balance=available_balance,
+            frozen_balance=frozen_balance,
+            market_value=market_value,
+            total_asset=total_asset,
+        )
+
+    def _query_real_positions(self, session_id: str):
+        context = self._get_real_session_context(session_id)
+        positions = self._get_trader().query_stock_positions(context["account"])
+        return positions or []
+
+    def _map_position(self, raw_position) -> PositionInfo:
+        stock_code = self._get_attr(raw_position, "stock_code", "stock_code1")
+        volume = self._to_int(self._get_attr(raw_position, "volume", "total_volume"))
+        if not stock_code or volume is None:
+            raise TradingServiceException("无法映射QMT持仓信息")
+
+        available_volume = self._to_int(
+            self._get_attr(raw_position, "available_volume", "can_use_volume"),
+            volume,
+        )
+        frozen_volume = self._to_int(
+            self._get_attr(raw_position, "frozen_volume"),
+            max(volume - (available_volume or 0), 0),
+        )
+        cost_price = self._to_float(
+            self._get_attr(raw_position, "cost_price", "avg_price", "open_price"),
+            0.0,
+        ) or 0.0
+        market_value = self._to_float(self._get_attr(raw_position, "market_value"), 0.0) or 0.0
+        market_price = self._to_float(
+            self._get_attr(raw_position, "market_price", "last_price"),
+            None,
+        )
+        if market_price is None and volume:
+            market_price = market_value / volume
+        if market_price is None:
+            market_price = 0.0
+
+        profit_loss = self._to_float(
+            self._get_attr(raw_position, "profit_loss", "float_profit", "position_profit"),
+            None,
+        )
+        if profit_loss is None:
+            profit_loss = market_value - cost_price * volume
+
+        profit_loss_ratio = self._to_float(
+            self._get_attr(raw_position, "profit_loss_ratio", "profit_rate"),
+            None,
+        )
+        cost_basis = cost_price * volume
+        if profit_loss_ratio is None:
+            profit_loss_ratio = (profit_loss / cost_basis) if cost_basis else 0.0
+
+        return PositionInfo(
+            stock_code=stock_code,
+            stock_name=self._get_attr(raw_position, "stock_name", "instrument_name", default=stock_code),
+            volume=volume,
+            available_volume=available_volume if available_volume is not None else volume,
+            frozen_volume=frozen_volume if frozen_volume is not None else 0,
+            cost_price=cost_price,
+            market_price=market_price,
+            market_value=market_value,
+            profit_loss=profit_loss,
+            profit_loss_ratio=profit_loss_ratio,
+        )
+
+    def _query_real_asset(self, session_id: str):
+        context = self._get_real_session_context(session_id)
+        asset = self._get_trader().query_stock_asset(context["account"])
+        if asset is None:
+            raise TradingServiceException("从QMT查询账户资产失败")
+        return asset
+
+    def _map_asset(self, raw_asset) -> AssetInfo:
+        total_asset = self._to_float(self._get_attr(raw_asset, "total_asset", "assetBalance", "current_balance"))
+        if total_asset is None:
+            raise TradingServiceException("无法映射QMT资产信息")
+
+        market_value = self._to_float(self._get_attr(raw_asset, "market_value", "marketValue"), 0.0) or 0.0
+        cash = self._to_float(self._get_attr(raw_asset, "cash", "available_cash", "enableBalance"), 0.0) or 0.0
+        frozen_cash = self._to_float(self._get_attr(raw_asset, "frozen_cash", "frozen_balance"), 0.0) or 0.0
+        available_cash = self._to_float(self._get_attr(raw_asset, "available_cash", "cash", "enableBalance"), cash) or cash
+        profit_loss = self._to_float(
+            self._get_attr(raw_asset, "profit_loss", "float_profit"),
+            total_asset - market_value - cash - frozen_cash,
+        ) or 0.0
+        profit_loss_ratio = self._to_float(self._get_attr(raw_asset, "profit_loss_ratio"), 0.0) or 0.0
+
+        return AssetInfo(
+            total_asset=total_asset,
+            market_value=market_value,
+            cash=cash,
+            frozen_cash=frozen_cash,
+            available_cash=available_cash,
+            profit_loss=profit_loss,
+            profit_loss_ratio=profit_loss_ratio,
+        )
+
+    def _query_real_orders(self, session_id: str):
+        context = self._get_real_session_context(session_id)
+        orders = self._get_trader().query_stock_orders(context["account"], False)
+        return orders or []
+
+    def _map_side(self, raw_value: Any) -> str:
+        if isinstance(raw_value, str):
+            upper = raw_value.upper()
+            if upper in {OrderSide.BUY.value, OrderSide.SELL.value}:
+                return upper
+            if upper.isdigit():
+                raw_value = int(upper)
+        stock_buy = getattr(xtconstant, "STOCK_BUY", None)
+        stock_sell = getattr(xtconstant, "STOCK_SELL", None)
+        if raw_value == stock_sell:
+            return OrderSide.SELL.value
+        if raw_value == stock_buy:
+            return OrderSide.BUY.value
+        raise TradingServiceException("无法映射QMT买卖方向")
+
+    def _map_order_type_name(self, raw_value: Any) -> str:
+        if isinstance(raw_value, str):
+            return raw_value.upper()
+        if raw_value is None:
+            return OrderRequest.model_fields["order_type"].default.value
+        if isinstance(raw_value, (int, float)):
+            return str(int(raw_value))
+        return OrderRequest.model_fields["order_type"].default.value
+
+    def _map_order_status(self, raw_status: Any) -> str:
+        if isinstance(raw_status, str):
+            return raw_status.upper()
+        if raw_status is None:
+            return OrderStatus.SUBMITTED.value
+        if isinstance(raw_status, (int, float)):
+            return str(int(raw_status))
+        return OrderStatus.SUBMITTED.value
+
+    def _map_order(self, raw_order) -> OrderResponse:
+        order_id = self._get_attr(raw_order, "order_id", "order_sysid")
+        stock_code = self._get_attr(raw_order, "stock_code", "stock_code1")
+        volume = self._to_int(self._get_attr(raw_order, "order_volume", "volume"))
+        if order_id is None or not stock_code or volume is None:
+            raise TradingServiceException("无法映射QMT委托信息")
+
+        traded_volume = self._to_int(self._get_attr(raw_order, "traded_volume", "filled_volume"), 0) or 0
+        traded_amount = self._to_float(self._get_attr(raw_order, "traded_amount", "filled_amount"), 0.0) or 0.0
+
+        return OrderResponse(
+            order_id=str(order_id),
+            stock_code=stock_code,
+            side=self._map_side(self._get_attr(raw_order, "side", "offset_flag", "direction")),
+            order_type=self._map_order_type_name(self._get_attr(raw_order, "order_type")),
+            volume=volume,
+            price=self._to_float(self._get_attr(raw_order, "price", "traded_price")),
+            status=self._map_order_status(self._get_attr(raw_order, "order_status")),
+            submitted_time=self._parse_datetime(self._get_attr(raw_order, "order_time")),
+            filled_volume=traded_volume,
+            filled_amount=traded_amount,
+            average_price=self._to_float(self._get_attr(raw_order, "traded_price", "average_price")),
+        )
+
+    def _query_real_trades(self, session_id: str):
+        context = self._get_real_session_context(session_id)
+        trades = self._get_trader().query_stock_trades(context["account"])
+        return trades or []
+
+    def _map_trade(self, raw_trade) -> TradeInfo:
+        trade_id = self._get_attr(raw_trade, "traded_id", "trade_id")
+        stock_code = self._get_attr(raw_trade, "stock_code", "stock_code1")
+        volume = self._to_int(self._get_attr(raw_trade, "traded_volume", "volume"))
+        price = self._to_float(self._get_attr(raw_trade, "traded_price", "price"))
+        if trade_id is None or not stock_code or volume is None or price is None:
+            raise TradingServiceException("无法映射QMT成交信息")
+
+        amount = self._to_float(self._get_attr(raw_trade, "traded_amount", "amount"), price * volume) or (price * volume)
+
+        return TradeInfo(
+            trade_id=str(trade_id),
+            order_id=str(self._get_attr(raw_trade, "order_id", default="")),
+            stock_code=stock_code,
+            side=self._map_side(self._get_attr(raw_trade, "side", "offset_flag", "direction")),
+            volume=volume,
+            price=price,
+            amount=amount,
+            trade_time=self._parse_datetime(self._get_attr(raw_trade, "traded_time", "trade_time")),
+            commission=self._to_float(self._get_attr(raw_trade, "commission"), 0.0) or 0.0,
+        )
+
+    def _map_xt_order_type(self, side: OrderSide) -> Any:
+        if side == OrderSide.BUY:
+            return getattr(xtconstant, "STOCK_BUY", side.value)
+        return getattr(xtconstant, "STOCK_SELL", side.value)
+
+    def _map_xt_price_type(self, order_type) -> Any:
+        order_type_value = getattr(order_type, "value", str(order_type))
+        if order_type_value == "LIMIT":
+            return getattr(xtconstant, "FIX_PRICE", order_type_value)
+        if order_type_value == "MARKET":
+            return getattr(xtconstant, "LATEST_PRICE", order_type_value)
+        raise TradingServiceException(f"暂不支持的QMT订单类型: {order_type_value}")
     
     def connect_account(self, request: ConnectRequest) -> ConnectResponse:
         """连接交易账户"""
         try:
-            # 调用xttrader连接账户
-            # account = xttrader.connect(request.account_id, request.password, request.client_id)
-            
-            # 模拟连接成功
-            account_info = AccountInfo(
-                account_id=request.account_id,
-                account_type=AccountType.SECURITY,
-                account_name=f"账户{request.account_id}",
-                status="CONNECTED",
-                balance=1000000.0,
-                available_balance=950000.0,
-                frozen_balance=50000.0,
-                market_value=800000.0,
-                total_asset=1800000.0
-            )
-            
-            session_id = f"session_{request.account_id}_{datetime.now().timestamp()}"
-            self._connected_accounts[session_id] = {
-                "account_info": account_info,
-                "connected_time": datetime.now()
-            }
-            
+            if not self._should_use_real_data():
+                account_info = self._get_mock_account_info(request.account_id)
+                session_id = self._store_mock_session(request.account_id, account_info)
+                return ConnectResponse(
+                    success=True,
+                    message="账户连接成功",
+                    session_id=session_id,
+                    account_info=account_info
+                )
+
+            self._require_real_trading_backend()
+            account = self._connect_real_account(request)
+            account_info = self._build_account_info_from_real_account(account)
+            session_id = self._store_real_session(request, account, account_info)
+
             return ConnectResponse(
                 success=True,
                 message="账户连接成功",
@@ -131,6 +556,11 @@ class TradingService:
                 account_info=account_info
             )
             
+        except TradingServiceException as e:
+            return ConnectResponse(
+                success=False,
+                message=str(e)
+            )
         except Exception as e:
             return ConnectResponse(
                 success=False,
@@ -149,57 +579,60 @@ class TradingService:
     
     def get_account_info(self, session_id: str) -> AccountInfo:
         """获取账户信息"""
-        if session_id not in self._connected_accounts:
-            raise TradingServiceException("账户未连接")
-        
-        return self._connected_accounts[session_id]["account_info"]
+        context = self._get_session_context(session_id)
+        if not self._should_use_real_data():
+            return context["account_info"]
+
+        try:
+            return self._map_account_info(self._query_real_account_info(session_id))
+        except TradingServiceException:
+            raise
+        except Exception as e:
+            raise TradingServiceException(f"获取账户信息失败: {str(e)}")
     
     def get_positions(self, session_id: str) -> List[PositionInfo]:
         """获取持仓信息"""
-        if session_id not in self._connected_accounts:
-            raise TradingServiceException("账户未连接")
+        self._get_session_context(session_id)
         
         try:
-            # 调用xttrader获取持仓
-            # positions = xttrader.query_stock_positions(session_id)
-            
-            # 模拟持仓数据
-            mock_positions = [
-                PositionInfo(
-                    stock_code="000001.SZ",
-                    stock_name="平安银行",
-                    volume=10000,
-                    available_volume=10000,
-                    frozen_volume=0,
-                    cost_price=12.50,
-                    market_price=13.20,
-                    market_value=132000.0,
-                    profit_loss=7000.0,
-                    profit_loss_ratio=0.056
-                ),
-                PositionInfo(
-                    stock_code="000002.SZ",
-                    stock_name="万科A",
-                    volume=5000,
-                    available_volume=5000,
-                    frozen_volume=0,
-                    cost_price=18.80,
-                    market_price=19.50,
-                    market_value=97500.0,
-                    profit_loss=3500.0,
-                    profit_loss_ratio=0.037
-                )
-            ]
-            
-            return mock_positions
-            
+            if not self._should_use_real_data():
+                return [
+                    PositionInfo(
+                        stock_code="000001.SZ",
+                        stock_name="平安银行",
+                        volume=10000,
+                        available_volume=10000,
+                        frozen_volume=0,
+                        cost_price=12.50,
+                        market_price=13.20,
+                        market_value=132000.0,
+                        profit_loss=7000.0,
+                        profit_loss_ratio=0.056
+                    ),
+                    PositionInfo(
+                        stock_code="000002.SZ",
+                        stock_name="万科A",
+                        volume=5000,
+                        available_volume=5000,
+                        frozen_volume=0,
+                        cost_price=18.80,
+                        market_price=19.50,
+                        market_value=97500.0,
+                        profit_loss=3500.0,
+                        profit_loss_ratio=0.037
+                    )
+                ]
+
+            return [self._map_position(position) for position in self._query_real_positions(session_id)]
+
+        except TradingServiceException:
+            raise
         except Exception as e:
             raise TradingServiceException(f"获取持仓信息失败: {str(e)}")
     
     def submit_order(self, session_id: str, request: OrderRequest) -> OrderResponse:
         """提交订单"""
-        if session_id not in self._connected_accounts:
-            raise TradingServiceException("账户未连接")
+        self._get_session_context(session_id)
         
         try:
             if not validate_stock_code(request.stock_code):
@@ -212,18 +645,23 @@ class TradingService:
             
             # ✅ 允许真实交易，调用xttrader提交订单
             logger.info(f"真实交易模式：提交订单 {request.stock_code} {request.side.value} {request.volume}股")
-            
-            order_id = xttrader.order_stock(
-                session_id,
+
+            account = self._get_real_session_context(session_id)["account"]
+            order_id = self._get_trader().order_stock(
+                account,
                 request.stock_code,
-                request.side.value,
+                self._map_xt_order_type(request.side),
                 request.volume,
-                request.price,
-                request.order_type.value
+                self._map_xt_price_type(request.order_type),
+                request.price or 0,
+                request.strategy_name or "qmt-proxy",
+                "submitted_by_proxy"
             )
+            if order_id is None or (isinstance(order_id, int) and order_id <= 0):
+                raise TradingServiceException("真实下单失败")
             
             order_response = OrderResponse(
-                order_id=order_id,
+                order_id=str(order_id),
                 stock_code=request.stock_code,
                 side=request.side.value,
                 order_type=request.order_type.value,
@@ -233,10 +671,12 @@ class TradingService:
                 submitted_time=datetime.now()
             )
             
-            self._orders[order_id] = order_response
+            self._orders[str(order_id)] = order_response
             
             return order_response
-            
+
+        except TradingServiceException:
+            raise
         except Exception as e:
             raise TradingServiceException(f"提交订单失败: {str(e)}")
     
@@ -261,8 +701,7 @@ class TradingService:
     
     def cancel_order(self, session_id: str, request: CancelOrderRequest) -> bool:
         """撤销订单（dev/mock模式下总是拦截并返回True）"""
-        if session_id not in self._connected_accounts:
-            raise TradingServiceException("账户未连接")
+        self._get_session_context(session_id)
         
         # dev/mock模式下直接拦截，始终返回True
         if not self._should_use_real_trading():
@@ -274,80 +713,81 @@ class TradingService:
         
         # prod模式下才做真实撤单校验
         try:
-            if request.order_id not in self._orders:
-                raise TradingServiceException("订单不存在")
             logger.info(f"真实交易模式：撤销订单 {request.order_id}")
-            success = xttrader.cancel_order_stock(session_id, request.order_id)
+            account = self._get_real_session_context(session_id)["account"]
+            normalized_order_id = int(request.order_id) if str(request.order_id).isdigit() else request.order_id
+            cancel_result = self._get_trader().cancel_order_stock(account, normalized_order_id)
+            success = cancel_result in (0, True)
             if success and request.order_id in self._orders:
                 self._orders[request.order_id].status = OrderStatus.CANCELLED.value
             return success
+        except TradingServiceException:
+            raise
         except Exception as e:
             raise TradingServiceException(f"撤销订单失败: {str(e)}")
     
     def get_orders(self, session_id: str) -> List[OrderResponse]:
         """获取订单列表"""
-        if session_id not in self._connected_accounts:
-            raise TradingServiceException("账户未连接")
+        self._get_session_context(session_id)
         
         try:
-            # 调用xttrader获取订单
-            # orders = xttrader.query_stock_orders(session_id)
-            
-            # 返回模拟订单数据
-            return list(self._orders.values())
-            
+            if not self._should_use_real_data():
+                return list(self._orders.values())
+
+            return [self._map_order(order) for order in self._query_real_orders(session_id)]
+
+        except TradingServiceException:
+            raise
         except Exception as e:
             raise TradingServiceException(f"获取订单列表失败: {str(e)}")
     
     def get_trades(self, session_id: str) -> List[TradeInfo]:
         """获取成交记录"""
-        if session_id not in self._connected_accounts:
-            raise TradingServiceException("账户未连接")
+        self._get_session_context(session_id)
         
         try:
-            # 调用xttrader获取成交记录
-            # trades = xttrader.query_stock_trades(session_id)
-            
-            # 模拟成交数据
-            mock_trades = [
-                TradeInfo(
-                    trade_id="trade_001",
-                    order_id="order_1001",
-                    stock_code="000001.SZ",
-                    side="BUY",
-                    volume=1000,
-                    price=13.20,
-                    amount=13200.0,
-                    trade_time=datetime.now(),
-                    commission=13.20
-                )
-            ]
-            
-            return mock_trades
-            
+            if not self._should_use_real_data():
+                return [
+                    TradeInfo(
+                        trade_id="trade_001",
+                        order_id="order_1001",
+                        stock_code="000001.SZ",
+                        side="BUY",
+                        volume=1000,
+                        price=13.20,
+                        amount=13200.0,
+                        trade_time=datetime.now(),
+                        commission=13.20
+                    )
+                ]
+
+            return [self._map_trade(trade) for trade in self._query_real_trades(session_id)]
+
+        except TradingServiceException:
+            raise
         except Exception as e:
             raise TradingServiceException(f"获取成交记录失败: {str(e)}")
     
     def get_asset_info(self, session_id: str) -> AssetInfo:
         """获取资产信息"""
-        if session_id not in self._connected_accounts:
-            raise TradingServiceException("账户未连接")
+        self._get_session_context(session_id)
         
         try:
-            # 调用xttrader获取资产信息
-            # asset = xttrader.query_stock_asset(session_id)
-            
-            # 模拟资产数据
-            return AssetInfo(
-                total_asset=1800000.0,
-                market_value=800000.0,
-                cash=950000.0,
-                frozen_cash=50000.0,
-                available_cash=900000.0,
-                profit_loss=50000.0,
-                profit_loss_ratio=0.028
-            )
-            
+            if not self._should_use_real_data():
+                return AssetInfo(
+                    total_asset=1800000.0,
+                    market_value=800000.0,
+                    cash=950000.0,
+                    frozen_cash=50000.0,
+                    available_cash=900000.0,
+                    profit_loss=50000.0,
+                    profit_loss_ratio=0.028
+                )
+
+            return self._map_asset(self._query_real_asset(session_id))
+
+        except TradingServiceException:
+            raise
         except Exception as e:
             raise TradingServiceException(f"获取资产信息失败: {str(e)}")
     

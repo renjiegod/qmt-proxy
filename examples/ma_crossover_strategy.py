@@ -28,7 +28,7 @@
 
     QMT_PROXY_URL   服务地址，默认 http://localhost:8000
     QMT_API_KEY     API 密钥，默认 dev-api-key-001
-    QMT_ACCOUNT_ID  交易账户，默认 test_account
+    QMT_ACCOUNT_ID  交易账户；未设置时使用占位值 test_account 并在连接失败时给出提示
 """
 
 from __future__ import annotations
@@ -61,7 +61,8 @@ log = logging.getLogger("策略")
 
 BASE_URL = os.getenv("QMT_PROXY_URL", "http://localhost:8000")
 API_KEY = os.getenv("QMT_API_KEY", "dev-api-key-001")
-ACCOUNT_ID = os.getenv("QMT_ACCOUNT_ID", "test_account")
+DEFAULT_ACCOUNT_ID = "test_account"
+ACCOUNT_ID = os.getenv("QMT_ACCOUNT_ID", DEFAULT_ACCOUNT_ID)
 
 SHORT_MA_PERIOD = 5
 LONG_MA_PERIOD = 20
@@ -116,6 +117,17 @@ def calc_change_pct(last_price: float | None, pre_close: float | None) -> float 
     if last_price is None or pre_close is None or pre_close <= 0:
         return None
     return (last_price - pre_close) / pre_close * 100
+
+
+def format_connect_failure_message(account_id: str, message: str) -> str:
+    """为常见的占位账户失败补充可操作的排查提示。"""
+    base_message = f"交易连接失败: {message}"
+    if account_id == DEFAULT_ACCOUNT_ID and "订阅交易账户失败" in message:
+        return (
+            f"{base_message}。当前示例正在使用默认占位账户 "
+            f"`{DEFAULT_ACCOUNT_ID}`，请设置环境变量 `QMT_ACCOUNT_ID` 为 QMT 中可订阅的真实账户后重试。"
+        )
+    return base_message
 
 
 def format_tick_log_line(
@@ -369,7 +381,7 @@ async def connect_trading(
     log.info("连接结果: success=%s | message=%s", resp.success, resp.message)
 
     if not resp.success or not resp.session_id:
-        raise RuntimeError(f"交易连接失败: {resp.message}")
+        raise RuntimeError(format_connect_failure_message(ACCOUNT_ID, resp.message))
 
     session_id = resp.session_id
     log.info("会话 ID: %s", session_id)

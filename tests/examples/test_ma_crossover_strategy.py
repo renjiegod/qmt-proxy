@@ -9,7 +9,7 @@ if str(LIBS_ROOT) not in sys.path:
 
 from qmt_proxy_sdk.models.data import QuoteData
 
-from examples.ma_crossover_strategy import format_tick_log_line
+from examples.ma_crossover_strategy import format_connect_failure_message, format_tick_log_line
 
 
 def test_format_tick_log_line_includes_price_change_amount_and_volume():
@@ -81,3 +81,17 @@ def test_format_tick_log_line_keeps_zero_amount_and_volume():
     assert "成交额=0.00" in line
     assert "量=0" in line
     assert "持仓=100股" in line
+
+
+def test_format_connect_failure_message_explains_placeholder_account_subscription_error():
+    message = format_connect_failure_message("test_account", "订阅交易账户失败，返回码: -1")
+
+    assert "订阅交易账户失败，返回码: -1" in message
+    assert "QMT_ACCOUNT_ID" in message
+    assert "真实账户" in message
+
+
+def test_format_connect_failure_message_keeps_non_placeholder_errors_unchanged():
+    message = format_connect_failure_message("acct-001", "xttrader 未初始化或未连接")
+
+    assert message == "交易连接失败: xttrader 未初始化或未连接"
