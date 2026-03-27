@@ -148,6 +148,56 @@ async def test_quote_stream_yields_quote_data():
 
 
 @pytest.mark.asyncio
+async def test_quote_stream_normalizes_nested_xtdata_payload():
+    """QuoteStream 应兼容服务端转发的 xtdata 嵌套行情结构。"""
+    ws_module = _load("qmt_proxy_sdk.ws")
+
+    fake_api = FakeDataApi()
+    messages = [
+        json.dumps({"type": "connected", "subscription_id": "sub-test-001"}),
+        json.dumps({
+            "type": "quote",
+            "data": {
+                "601166.SH": [{
+                    "time": 1774579758000,
+                    "lastPrice": 18.74,
+                    "open": 18.8,
+                    "high": 18.92,
+                    "low": 18.7,
+                    "lastClose": 18.88,
+                    "amount": 531665380.0,
+                    "volume": 282683,
+                    "askPrice": [18.75, 18.76],
+                    "bidPrice": [18.74, 18.73],
+                    "askVol": [105, 231],
+                    "bidVol": [5634, 821],
+                    "transactionNum": 26065,
+                }]
+            },
+            "timestamp": "2024-01-01T09:30:00",
+        }),
+    ]
+    fake_ws = FakeWebSocket(messages)
+
+    stream = ws_module.QuoteStream(
+        data_api=fake_api,
+        ws_base_url="ws://localhost:8000",
+        symbols=["601166.SH"],
+    )
+
+    with patch("qmt_proxy_sdk.ws.connect", return_value=fake_ws):
+        async for quote in stream:
+            assert quote.stock_code == "601166.SH"
+            assert quote.last_price == 18.74
+            assert quote.pre_close == 18.88
+            assert quote.ask_price == [18.75, 18.76]
+            assert quote.bid_vol == [5634, 821]
+            assert quote.timestamp == "2024-01-01T09:30:00"
+            assert quote.model_extra["transactionNum"] == 26065
+            break
+
+
+@pytest.mark.asyncio
 async def test_quote_stream_skips_pong_and_connected():
     """connected 和 pong 消息不应产出 QuoteData。"""
     ws_module = _load("qmt_proxy_sdk.ws")

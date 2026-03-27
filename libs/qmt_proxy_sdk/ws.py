@@ -108,7 +108,7 @@ class QuoteStream:
                                 msg_type = msg.get("type")
 
                                 if msg_type == "quote":
-                                    yield QuoteData.model_validate(msg["data"])
+                                    yield self._parse_quote_message(msg)
                                 elif msg_type == "error":
                                     raise QmtProxyError(
                                         msg.get("message", "Unknown WebSocket error")
@@ -147,6 +147,53 @@ class QuoteStream:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _parse_quote_message(self, msg: dict) -> QuoteData:
+        """Normalize quote payloads from both flat and xtdata-nested formats."""
+        payload = msg["data"]
+        if isinstance(payload, dict):
+            nested_quote = self._normalize_nested_quote_payload(payload, msg)
+            if nested_quote is not None:
+                return QuoteData.model_validate(nested_quote)
+
+            flat_quote = dict(payload)
+            if msg.get("timestamp") and "timestamp" not in flat_quote:
+                flat_quote["timestamp"] = msg["timestamp"]
+            return QuoteData.model_validate(flat_quote)
+
+        return QuoteData.model_validate(payload)
+
+    def _normalize_nested_quote_payload(
+        self, payload: dict, msg: dict
+    ) -> dict | None:
+        """Convert ``{symbol: [xtdata_tick]}`` payloads into QuoteData fields."""
+        if len(payload) != 1:
+            return None
+
+        stock_code, raw_items = next(iter(payload.items()))
+        if not isinstance(stock_code, str):
+            return None
+        if not isinstance(raw_items, list) or not raw_items:
+            return None
+
+        raw_quote = raw_items[0]
+        if not isinstance(raw_quote, dict):
+            return None
+
+        normalized = dict(raw_quote)
+        normalized.update(
+            {
+                "stock_code": stock_code,
+                "timestamp": msg.get("timestamp", raw_quote.get("time")),
+                "last_price": raw_quote.get("lastPrice"),
+                "pre_close": raw_quote.get("lastClose"),
+                "bid_price": raw_quote.get("bidPrice"),
+                "ask_price": raw_quote.get("askPrice"),
+                "bid_vol": raw_quote.get("bidVol"),
+                "ask_vol": raw_quote.get("askVol"),
+            }
+        )
+        return normalized
 
     async def _ensure_subscription(self) -> str:
         if self._subscription_id is None:
