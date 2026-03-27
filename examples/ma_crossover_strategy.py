@@ -111,6 +111,41 @@ def calc_ma(prices: deque, period: int) -> float | None:
     return sum(list(prices)[-period:]) / period
 
 
+def calc_change_pct(last_price: float | None, pre_close: float | None) -> float | None:
+    """根据昨收计算涨跌幅百分比。"""
+    if last_price is None or pre_close is None or pre_close <= 0:
+        return None
+    return (last_price - pre_close) / pre_close * 100
+
+
+def format_tick_log_line(
+    tick_count: int,
+    quote,
+    short_ma: float | None,
+    long_ma: float | None,
+    position_str: str,
+) -> str:
+    """格式化实时 tick 日志，缺失的非关键字段统一显示为 N/A。"""
+    change_pct = calc_change_pct(quote.last_price, getattr(quote, "pre_close", None))
+
+    price_str = f"{quote.last_price:.2f}" if quote.last_price is not None else "N/A"
+    change_pct_str = f"{change_pct:.2f}%" if change_pct is not None else "N/A"
+    amount = getattr(quote, "amount", None)
+    amount_str = f"{amount:.2f}" if amount is not None else "N/A"
+    volume = getattr(quote, "volume", None)
+    volume_str = str(volume) if volume is not None else "N/A"
+    short_ma_str = f"{short_ma:.2f}" if short_ma is not None else "N/A"
+    long_ma_str = f"{long_ma:.2f}" if long_ma is not None else "N/A"
+
+    return (
+        f"[TICK #{tick_count:04d}] {quote.stock_code} | "
+        f"价格={price_str} | 涨跌幅={change_pct_str} | "
+        f"成交额={amount_str} | 量={volume_str} | "
+        f"MA{SHORT_MA_PERIOD}={short_ma_str} | "
+        f"MA{LONG_MA_PERIOD}={long_ma_str} | 持仓={position_str}"
+    )
+
+
 class PositionManager:
     """仓位管理器：根据账户资金动态分配每只股票的下单数量。"""
 
@@ -463,17 +498,13 @@ async def run_realtime_strategy(
 
             position_str = f"{ctx.held_volume}股" if ctx.held else "无"
             log.info(
-                "[TICK #%04d] %s | 价格=%.2f | 量=%s | "
-                "MA%d=%s | MA%d=%s | 持仓=%s",
-                tick_count,
-                code,
-                price,
-                quote.volume,
-                SHORT_MA_PERIOD,
-                f"{short_ma:.2f}" if short_ma else "N/A",
-                LONG_MA_PERIOD,
-                f"{long_ma:.2f}" if long_ma else "N/A",
-                position_str,
+                format_tick_log_line(
+                    tick_count=tick_count,
+                    quote=quote,
+                    short_ma=short_ma,
+                    long_ma=long_ma,
+                    position_str=position_str,
+                )
             )
 
             if short_ma is None or long_ma is None:
