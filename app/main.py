@@ -19,6 +19,7 @@ from app.routers import data, health, trading, websocket
 from app.utils.exceptions import XTQuantException
 from app.utils.helpers import format_response
 from app.utils.logger import configure_logging, logger
+from app.web_ui import register_web_ui_routes
 
 
 def reset_api_docs(swagger_ui_version: str = "5", redoc_version: str = "2") -> None:
@@ -175,6 +176,7 @@ app.include_router(health.router)
 app.include_router(data.router)
 app.include_router(trading.router)
 app.include_router(websocket.router)
+register_web_ui_routes(app)
 
 
 @app.get("/")

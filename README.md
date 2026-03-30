@@ -25,6 +25,7 @@
 - 🌐 **REST API**: 基于 FastAPI，提供 HTTP/HTTPS 接口，自动生成 Swagger 文档
 - ⚡ **gRPC**: 高性能 RPC 框架，支持流式调用和双向通信
 - 🔔 **WebSocket**: 提供行情订阅实时推送，内置心跳与限流控制
+- 🖥️ **Web UI 工作台**: 内置 React + Ant Design 控制台，可查看订阅、实时推送和市场数据查询
 - 🔄 **统一服务**: 两种协议共享相同的业务逻辑层，一次部署同时服务
 
 ### 🛡️ 安全可靠
@@ -56,6 +57,7 @@ quant-qmt-proxy/
 │   ├── grpc_client.py          # gRPC 客户端封装
 │   ├── config.py               # 配置管理（单例）
 │   ├── dependencies.py         # 依赖注入（单例服务）
+│   ├── web_ui.py               # Web UI 静态资源入口
 │   ├── models/                 # Pydantic 数据模型
 │   │   ├── data_models.py      # 数据相关模型
 │   │   └── trading_models.py   # 交易相关模型
@@ -100,6 +102,7 @@ quant-qmt-proxy/
 ├── scripts/                    # 工具脚本
 │   └── generate_proto.py       # protobuf 代码生成脚本
 ├── logs/                       # 日志文件目录
+├── web/                        # React + Ant Design Web UI
 ├── config.yml                  # 统一配置文件
 ├── requirements.txt            # Python 依赖
 ├── run.py                      # 启动脚本（同时启动 REST + gRPC）
@@ -184,11 +187,18 @@ $env:APP_MODE="prod"; python run.py
 | **Swagger UI** | http://localhost:8000/docs | 交互式 API 文档 |
 | **ReDoc** | http://localhost:8000/redoc | API 文档（阅读友好） |
 | **健康检查** | http://localhost:8000/health/ | 服务健康状态 |
+| **Web UI** | http://localhost:8000/ui | 订阅与市场数据工作台 |
 | **WebSocket 测试页** | http://localhost:8000/ws/test | 行情推送调试页面 |
 
 ### 6. 运行测试
 
 ```bash
+# Web UI 测试
+npm --prefix web run test
+
+# Web UI 构建
+npm --prefix web run build
+
 # REST API 测试
 pytest tests/rest/ -v
 
@@ -309,6 +319,7 @@ pytest tests/ -v
 ### WebSocket 接口
 - `GET /ws/quote/{subscription_id}` - 行情订阅推送，支持 `ping/pong` 心跳
 - `GET /ws/test` - 内置测试页面，可浏览器直接调试订阅
+- `GET /ui` - 内置 Web UI 入口，展示订阅、实时推送和市场数据查询
 
 > **✨ 行情订阅特性**: 
 > - 支持多股票同时订阅
@@ -490,15 +501,38 @@ modes:
 2. 使用 **dev 模式** 连接真实 QMT 进行策略开发
 3. 充分测试后切换到 **prod 模式** 进行实盘交易
 
-### API 认证
-默认使用 API Key 认证，请求头格式：
+### Web UI 开发
+
+```bash
+# 安装前端依赖
+make ui-install
+
+# 启动前端开发服务器（默认代理到 http://127.0.0.1:8000）
+make ui-dev
+
+# 构建前端产物，供 FastAPI 在 /ui 下托管
+make ui-build
+
+# 本地预览构建产物
+make ui-preview
+
+# 运行前端测试
+make ui-test
 ```
-X-API-Key: your-api-key
+
+Web UI 生产构建默认输出到 `web/dist`，FastAPI 会自动在 `/ui` 与 `/ui/*` 下提供 SPA 入口和静态资源。如果需要在部署时覆盖构建目录，可设置环境变量 `QMT_PROXY_UI_DIST_DIR`。
+
+### API 认证
+当前后端 `verify_api_key` 通过 HTTP Bearer 令牌校验 API Key，请求头格式：
+```
+Authorization: Bearer your-api-key
 ```
 
 dev 模式可用的 API Key（在 config.yml 中配置）：
 - `dev-api-key-001`
 - `dev-api-key-002`
+
+Web UI 顶部的 API Key 输入框复用相同的 Bearer 令牌配置。
 
 ### 日志查看
 

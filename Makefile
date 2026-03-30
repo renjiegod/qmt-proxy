@@ -5,7 +5,7 @@ PYTHON_VERSION ?= 3.12
 APP_MODE ?= dev
 POWERSHELL := powershell -NoProfile -ExecutionPolicy Bypass -File scripts\make.ps1
 
-.PHONY: help bootstrap-uv install sync lock start start-bg stop force-stop restart status logs clean
+.PHONY: help bootstrap-uv install sync lock start start-bg stop force-stop restart status logs clean ui-install ui-dev ui-build ui-preview ui-test
 
 help:
 	@$(POWERSHELL) -Action help -PythonExe "$(UV_PYTHON)" -PythonVersion "$(PYTHON_VERSION)" -AppMode "$(APP_MODE)"
@@ -45,3 +45,18 @@ logs:
 
 clean:
 	@$(POWERSHELL) -Action clean -PythonExe "$(UV_PYTHON)" -PythonVersion "$(PYTHON_VERSION)" -AppMode "$(APP_MODE)"
+
+ui-install:
+	npm --prefix web install
+
+ui-dev:
+	npm --prefix web run dev
+
+ui-build:
+	npm --prefix web run build
+
+ui-preview:
+	npm --prefix web run preview
+
+ui-test:
+	npm --prefix web run test
