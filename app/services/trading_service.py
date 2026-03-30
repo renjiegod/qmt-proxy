@@ -161,7 +161,7 @@ class TradingService:
         if value is None:
             return default
         try:
-            return int(value)/
+            return int(value)
         except (TypeError, ValueError):
             return default
 
