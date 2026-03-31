@@ -507,6 +507,9 @@ modes:
 # 安装前端依赖
 make ui-install
 
+# 同时启动后端和前端开发服务
+make dev
+
 # 启动前端开发服务器（默认代理到 http://127.0.0.1:8000）
 make ui-dev
 

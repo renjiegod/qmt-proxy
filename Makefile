@@ -5,7 +5,7 @@ PYTHON_VERSION ?= 3.12
 APP_MODE ?= dev
 POWERSHELL := powershell -NoProfile -ExecutionPolicy Bypass -File scripts\make.ps1
 
-.PHONY: help bootstrap-uv install sync lock start start-bg stop force-stop restart status logs clean ui-install ui-dev ui-build ui-preview ui-test
+.PHONY: help bootstrap-uv install sync lock start dev start-bg stop force-stop restart status logs clean ui-install ui-dev ui-build ui-preview ui-test
 
 help:
 	@$(POWERSHELL) -Action help -PythonExe "$(UV_PYTHON)" -PythonVersion "$(PYTHON_VERSION)" -AppMode "$(APP_MODE)"
@@ -24,6 +24,9 @@ lock: bootstrap-uv
 
 start: bootstrap-uv
 	@$(POWERSHELL) -Action start -PythonExe "$(UV_PYTHON)" -PythonVersion "$(PYTHON_VERSION)" -AppMode "$(APP_MODE)"
+
+dev: bootstrap-uv
+	@$(POWERSHELL) -Action dev -PythonExe "$(UV_PYTHON)" -PythonVersion "$(PYTHON_VERSION)" -AppMode "$(APP_MODE)"
 
 start-bg: bootstrap-uv
 	@$(POWERSHELL) -Action start-bg -PythonExe "$(UV_PYTHON)" -PythonVersion "$(PYTHON_VERSION)" -AppMode "$(APP_MODE)"
@@ -47,16 +50,16 @@ clean:
 	@$(POWERSHELL) -Action clean -PythonExe "$(UV_PYTHON)" -PythonVersion "$(PYTHON_VERSION)" -AppMode "$(APP_MODE)"
 
 ui-install:
-	npm --prefix web install
+	@$(POWERSHELL) -Action ui-install -PythonExe "$(UV_PYTHON)" -PythonVersion "$(PYTHON_VERSION)" -AppMode "$(APP_MODE)"
 
 ui-dev:
-	npm --prefix web run dev
+	@$(POWERSHELL) -Action ui-dev -PythonExe "$(UV_PYTHON)" -PythonVersion "$(PYTHON_VERSION)" -AppMode "$(APP_MODE)"
 
 ui-build:
-	npm --prefix web run build
+	@$(POWERSHELL) -Action ui-build -PythonExe "$(UV_PYTHON)" -PythonVersion "$(PYTHON_VERSION)" -AppMode "$(APP_MODE)"
 
 ui-preview:
-	npm --prefix web run preview
+	@$(POWERSHELL) -Action ui-preview -PythonExe "$(UV_PYTHON)" -PythonVersion "$(PYTHON_VERSION)" -AppMode "$(APP_MODE)"
 
 ui-test:
-	npm --prefix web run test
+	@$(POWERSHELL) -Action ui-test -PythonExe "$(UV_PYTHON)" -PythonVersion "$(PYTHON_VERSION)" -AppMode "$(APP_MODE)"
