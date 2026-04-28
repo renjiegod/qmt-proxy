@@ -2,7 +2,7 @@
 
 UV_PYTHON ?= python
 PYTHON_VERSION ?= 3.12
-APP_MODE ?= dev
+APP_MODE ?= prod
 POWERSHELL := powershell -NoProfile -ExecutionPolicy Bypass -File scripts\make.ps1
 
 .PHONY: help bootstrap-uv install sync lock start dev start-bg stop force-stop restart status logs clean ui-install ui-dev ui-build ui-preview ui-test
